@@ -138,7 +138,7 @@ index caf6390..a91c961 100644
      {
          WCHAR remainder_wide[MAX_PATH];
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index c65632c..059e7d5 100644
+index c65632c..a7dd92f 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -225,7 +225,7 @@ typedef struct {
@@ -724,7 +724,7 @@ index c65632c..059e7d5 100644
      in[0] = a; in[1] = b; in[2] = c;
      for (i = 0; i < 3; i++) {
          const Nv2aVshOutput *p = in[i], *q = in[(i + 1) % 3];
-@@ -2176,12 +2592,20 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+@@ -2176,13 +2592,40 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
      return nv2a_vsh_run((const float (*)[4])in, out);
  }
  
@@ -739,14 +739,36 @@ index c65632c..059e7d5 100644
  {
      uint32_t i, n = s_gpu.idx_count;
  
-     for (i = 0; i < n; i++)
+-    for (i = 0; i < n; i++)
 -        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
-+        if (!(s_ff_active ? ff_transform_vertex(s_gpu.idx[i], &s_xf[i])
-+                          : transform_vertex(s_gpu.idx[i], &s_xf[i])))
-             return;                                    /* no program loaded */
+-            return;                                    /* no program loaded */
++    {                                                     /* [sp1] vertex cache */
++        static uint32_t vk[8192], vg[8192], vp[8192], gen;
++        static int on = -1;
++        if (on < 0) {
++            on = getenv("RECOMP_NO_VCACHE") == NULL;
++            fprintf(stderr, "[VC] post-transform vertex cache %s\n", on ? "on" : "off");
++        }
++        if (++gen == 0) {
++            memset(vg, 0, sizeof vg);
++            gen = 1;
++        }
++        for (i = 0; i < n; i++) {
++            uint32_t v = s_gpu.idx[i], h = (v ^ (v >> 13)) & 8191u;
++            if (on && vg[h] == gen && vk[h] == v) {
++                s_xf[i] = s_xf[vp[h]];
++                continue;
++            }
++            if (!(s_ff_active ? ff_transform_vertex(v, &s_xf[i])
++                              : transform_vertex(v, &s_xf[i])))
++                return;                                /* no program loaded */
++            vk[h] = v; vg[h] = gen; vp[h] = i;
++        }
++    }
      s_gpu.batches_program++;
      s_gpu.verts_program += n;
-@@ -2290,7 +2714,90 @@ static void raster_batch(void)
+     if (s_gpu.blend_enable) {
+@@ -2290,7 +2733,90 @@ static void raster_batch(void)
          return;
      }
      if (!batch_is_screen_space()) {
@@ -838,7 +860,7 @@ index c65632c..059e7d5 100644
          return;
      }
  
-@@ -2894,6 +3401,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -2894,6 +3420,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -854,7 +876,7 @@ index c65632c..059e7d5 100644
      if (s_ftrace == 2) {
          /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
           * less the bulk (vertex data, program and constant uploads). */
-@@ -3003,6 +3519,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3003,6 +3538,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -880,7 +902,7 @@ index c65632c..059e7d5 100644
          clear_surface(param);
          if (param & 0x01)                         /* Z */
              zbuf_clear();
-@@ -3053,12 +3588,29 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3053,12 +3607,29 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          if (!s_gpu.prim)
              break;
          for (i = 0; i < count && s_gpu.idx_count < NV_MAX_INDICES; i++)
@@ -911,7 +933,7 @@ index c65632c..059e7d5 100644
          if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
-@@ -3212,6 +3764,49 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3212,6 +3783,49 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * them -- so they are constants that happen to arrive by method.
           * Dropped, every vertex program put its whole batch at the origin:
           * no 3D anywhere, and a black car on the garage screen. */
@@ -962,7 +984,7 @@ index c65632c..059e7d5 100644
              nv2a_vsh_constant_component(59, (method - 0x0A20) / 4, param);
              break;
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 65bbedb..3ea581c 100644
+index 65bbedb..3220cd2 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
 @@ -42,6 +42,7 @@ static int s_seen_count;
@@ -973,7 +995,15 @@ index 65bbedb..3ea581c 100644
  static uint32_t s_tot_calls;
  
  /* Executing is opt-in separately from surveying: a survey is read-only, while
-@@ -171,6 +172,7 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
+@@ -49,6 +50,7 @@ static uint32_t s_tot_calls;
+ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+ extern void nv2a_pb_exec_report(void);
+ static int s_exec_enabled = -1;
++static int s_scan_on;                  /* [sp1] RECOMP_PB_SCAN */
+ 
+ static void note(uint32_t subch, uint32_t method)
+ {
+@@ -171,6 +173,7 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
  
      while (va < end_va && words < 0x100000u) {
          uint32_t w = *(const uint32_t *)(mem + va);
@@ -981,14 +1011,25 @@ index 65bbedb..3ea581c 100644
          va += 4;
          words++;
  
-@@ -206,6 +208,7 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
+@@ -205,7 +208,9 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
+ 
              for (uint32_t i = 0; i < count && va < end_va; i++) {
                  uint32_t m = noninc ? method : method + i * 4;
-                 note(subch, m);
+-                note(subch, m);
++                if (s_scan_on)
++                    note(subch, m);
 +                g_pb_walk_method = (subch << 16) | m; g_pb_walk_count++;
                  /* Same walk, two consumers: the survey counts, the executor
                   * acts. Keeping them on one decode means they can never
                   * disagree about what the stream said. */
+@@ -231,6 +236,7 @@ void nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
+     static int scan = -1;
+     if (scan < 0)
+         scan = getenv("RECOMP_PB_SCAN") != NULL;
++    s_scan_on = scan;
+     if (!(scan || s_exec_enabled) || end_va <= start_va)
+         return;
+     if (end_va - start_va > 0x400000u)        /* a sane single-frame bound */
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
 index 72d5131..b2929e1 100644
 --- a/src/kernel/xbox_memory_layout.c
