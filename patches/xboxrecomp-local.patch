@@ -138,10 +138,157 @@ index caf6390..a91c961 100644
      {
          WCHAR remainder_wide[MAX_PATH];
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index c65632c..0a7e5bc 100644
+index c65632c..ea85db2 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -2098,6 +2098,84 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+@@ -225,7 +225,7 @@ typedef struct {
+ } VertexAttr;
+ 
+ #define NV_VERTEX_ATTRS 16
+-#define NV_MAX_INDICES  4096
++#define NV_MAX_INDICES  65536   /* [ix1] was 4096 */
+ #define NV_MAX_INLINE   65536           /* dwords of INLINE_ARRAY per batch */
+ 
+ /* Texture stage 0, decoded from what the title programmed.
+@@ -250,7 +250,7 @@ typedef struct {
+ static struct {
+     VertexAttr attr[NV_VERTEX_ATTRS];
+     uint32_t   prim;                    /* SET_BEGIN_END parameter, 0 = ended */
+-    uint16_t   idx[NV_MAX_INDICES];
++    uint32_t   idx[NV_MAX_INDICES];
+     uint32_t   idx_count;
+     /* INLINE_ARRAY payload: vertices written straight into the pushbuffer
+      * instead of into a buffer the title points at. Same vertex format, a
+@@ -1580,16 +1580,29 @@ static void zbuf_clear(void)
+             z[k] = v;
+ }
+ 
++static float s_zeps = -1.0f;                          /* [zf2] RECOMP_ZEPS */
++static uint32_t s_pofs_en[3];                         /* point, line, fill */
++static float s_pofs_scale, s_pofs_bias;
++static int s_pofs_mode = -1;                          /* 0 off, 1 apply, 2 skip */
++
+ static int depth_pass(float z, float stored)
+ {
++    float e = 0.0f;
++    if (s_zeps < 0.0f) {
++        const char *v = getenv("RECOMP_ZEPS");
++        s_zeps = v ? (float)atof(v) : 0.0f;
++        if (s_zeps < 0.0f) s_zeps = 0.0f;
++    }
++    if (s_zeps > 0.0f && stored < 1e30f && stored > -1e30f)
++        e = s_zeps * fabsf(stored);
+     switch (s_gpu.depth_func) {                   /* GL enums, as the NV2A */
+     case 0x200: return 0;
+-    case 0x201: return z <  stored;
+-    case 0x202: return z == stored;
+-    case 0x203: return z <= stored;
+-    case 0x204: return z >  stored;
++    case 0x201: return z <  stored + e;
++    case 0x202: return fabsf(z - stored) <= e;
++    case 0x203: return z <= stored + e;
++    case 0x204: return z >  stored - e;
+     case 0x205: return z != stored;
+-    case 0x206: return z >= stored;
++    case 0x206: return z >= stored - e;
+     default:    return 1;
+     }
+ }
+@@ -1795,11 +1808,37 @@ typedef struct {
+     float iw[3], uv[3][2], stc[3][4][4], vfog[3], fogc[4], inv_area;
+     float *zb;
+     int minx, maxx, miny, maxy, use_rc, textured;
++    float zofs;                         /* [zf2] */
+ } XfTri;
+ 
+ typedef struct { uint64_t depth_fail, pixels; uint32_t zpass; } XfCount;
+ 
+ /* Rows y0, y0+step, ... < maxy of triangle T. */
++static int s_dbg_shade = -1;                          /* [sh1] RECOMP_DBG_SHADE */
++
++static uint32_t dbg_shade_color(const XfTri *T, const float col[4],
++                                float l0, float l1, float l2, float pw)
++{
++    float c[4];
++    if (s_dbg_shade == 2) {
++        c[0] = col[0]; c[1] = col[1]; c[2] = col[2]; c[3] = 1.0f;
++    } else {
++        float u, v;
++        if (T->use_rc) {
++            u = (l0 * T->stc[0][0][0] + l1 * T->stc[1][0][0] + l2 * T->stc[2][0][0]) / pw;
++            v = (l0 * T->stc[0][0][1] + l1 * T->stc[1][0][1] + l2 * T->stc[2][0][1]) / pw;
++        } else {
++            u = (l0 * T->uv[0][0] + l1 * T->uv[1][0] + l2 * T->uv[2][0]) / pw;
++            v = (l0 * T->uv[0][1] + l1 * T->uv[1][1] + l2 * T->uv[2][1]) / pw;
++        }
++        c[0] = u - floorf(u); c[1] = v - floorf(v);
++        c[2] = (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) ? 1.0f : 0.0f;
++        c[3] = 1.0f;
++        if (u != u || v != v) { c[0] = 1.0f; c[1] = 0.0f; c[2] = 1.0f; }
++    }
++    return pack_color(c);
++}
++
+ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+ {
+     const float *a = T->a, *b = T->b, *c = T->c;
+@@ -1819,7 +1858,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+                 continue;
+             /* w1 is opposite a, w2 opposite b, w0 opposite c. */
+             l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
+-            z = l0 * a[2] + l1 * b[2] + l2 * c[2];
++            z = l0 * a[2] + l1 * b[2] + l2 * c[2] + T->zofs;
+             {
+                 float *zp = T->zb ? &T->zb[(size_t)y * NV_ZBUF_W + x] : NULL;
+                 int shade = (s_gpu.color_mask & 0x01010101u) || s_gpu.alpha_test;
+@@ -1835,7 +1874,15 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+                     for (k = 0; k < 4; k++)
+                         col[k] = l0 * va->d0[k] + l1 * vb->d0[k] + l2 * vc->d0[k];
+                     pw = l0 * T->iw[0] + l1 * T->iw[1] + l2 * T->iw[2];
+-                    if (T->use_rc) {
++                    if (s_dbg_shade < 0) {                  /* [sh1] */
++                        const char *e = getenv("RECOMP_DBG_SHADE");
++                        s_dbg_shade = e ? atoi(e) : 0;
++                    }
++                    if (s_dbg_shade == 1)
++                        col[0] = col[1] = col[2] = col[3] = 1.0f;
++                    if (s_dbg_shade >= 2) {
++                        argb = dbg_shade_color(T, col, l0, l1, l2, pw);
++                    } else if (T->use_rc) {
+                         float d1[4], fog[4], t[4][4], out[4], tc[4];
+                         int st, j, keep = 1;
+                         for (k = 0; k < 4; k++)
+@@ -2068,6 +2115,29 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+         return;
+     }
+     s_gpu.xf_drawn++;
++    if (s_pofs_mode < 0) {                             /* [zf2] polygon offset */
++        const char *v = getenv("RECOMP_POFS");
++        s_pofs_mode = !v ? 0 : (v[0] == 's' ? 2 : (v[0] == '0' ? 0 : 1));
++    }
++    if (s_pofs_mode && s_pofs_en[2] && (s_pofs_scale != 0.0f || s_pofs_bias != 0.0f)) {
++        float dzdx, dzdy, m, zs, r;
++        static int said;
++        if (s_pofs_mode == 2)
++            return;
++        dzdx = ((b[2] - a[2]) * (c[1] - a[1]) - (c[2] - a[2]) * (b[1] - a[1])) / area;
++        dzdy = ((c[2] - a[2]) * (b[0] - a[0]) - (b[2] - a[2]) * (c[0] - a[0])) / area;
++        m = fmaxf(fabsf(dzdx), fabsf(dzdy));
++        zs = fabsf(nv2a_vsh_constant(58)[2]);
++        r = zs > 2.0f ? 1.0f : 1.0f / 16777215.0f;
++        T.zofs = s_pofs_scale * m + s_pofs_bias * r;
++        if (!said) {
++            said = 1;
++            fprintf(stderr, "[POFS] first offset tri: zscale %g r %g scale %g bias %g"
++                    " slope %g -> zofs %g (z %g %g %g)\n", zs, r, s_pofs_scale,
++                    s_pofs_bias, m, T.zofs, a[2], b[2], c[2]);
++            fflush(stderr);
++        }
++    }
+     T.inv_area = 1.0f / area;
+ 
+     xf_rows_parallel(&T, &cnt);
+@@ -2098,6 +2168,96 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
   * check, which is correct, just slower for huge off-screen triangles. */
  #define NV_CLIP_W 1e-3f
  
@@ -157,6 +304,9 @@ index c65632c..0a7e5bc 100644
 +static int s_ff_active;
 +static unsigned s_ff_batches;
 +
++static uint32_t s_ff_texmat_en[4], s_ff_texgen[4][4];   /* [ff2] */
++static float s_ff_texmat[4][16];
++static int s_ff_texmat_on = -1;     /* RECOMP_FF_TEXMAT=1 */
 +static int s_ff_tr = -1;          /* RECOMP_FF_TRANSPOSE=1: other matrix order */
 +
 +static void ff_mul(const float m[16], const float v[4], float r[4])
@@ -219,6 +369,15 @@ index c65632c..0a7e5bc 100644
 +        out->d1[0] = out->d1[1] = out->d1[2] = out->d1[3] = 0.0f;
 +    for (k = 0; k < 4; k++)
 +        fetch_attr(&s_gpu.attr[9 + k], index, out->tex[k]);
++    if (s_ff_texmat_on < 0)                            /* [ff2] */
++        s_ff_texmat_on = getenv("RECOMP_FF_TEXMAT") != NULL;
++    if (s_ff_texmat_on)
++        for (k = 0; k < 4; k++)
++            if (s_ff_texmat_en[k]) {
++                float tt[4];
++                ff_mul(s_ff_texmat[k], out->tex[k], tt);
++                memcpy(out->tex[k], tt, sizeof tt);
++            }
 +    out->fog[0] = out->fog[1] = out->fog[2] = out->fog[3] = fabsf(eye[2]);
 +    return 1;
 +}
@@ -226,7 +385,7 @@ index c65632c..0a7e5bc 100644
  static void xf_to_clip(const Nv2aVshOutput *v, const float k[3],
                         const float o[3], float c[3])
  {
-@@ -2137,6 +2215,10 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+@@ -2137,6 +2297,10 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
          const float *sc = nv2a_vsh_constant(58), *of = nv2a_vsh_constant(59);
          for (i = 0; i < 3; i++) { k[i] = sc[i]; o[i] = of[i]; }
      }
@@ -237,7 +396,7 @@ index c65632c..0a7e5bc 100644
      in[0] = a; in[1] = b; in[2] = c;
      for (i = 0; i < 3; i++) {
          const Nv2aVshOutput *p = in[i], *q = in[(i + 1) % 3];
-@@ -2181,7 +2263,8 @@ static void raster_batch_program(void)
+@@ -2181,7 +2345,8 @@ static void raster_batch_program(void)
      uint32_t i, n = s_gpu.idx_count;
  
      for (i = 0; i < n; i++)
@@ -247,7 +406,7 @@ index c65632c..0a7e5bc 100644
              return;                                    /* no program loaded */
      s_gpu.batches_program++;
      s_gpu.verts_program += n;
-@@ -2290,7 +2373,28 @@ static void raster_batch(void)
+@@ -2290,7 +2455,85 @@ static void raster_batch(void)
          return;
      }
      if (!batch_is_screen_space()) {
@@ -258,6 +417,63 @@ index c65632c..0a7e5bc 100644
 +        if (no_ff) {
 +            s_gpu.batches_untransformed++;
 +            return;
++        }
++        {                                                  /* [ff2] */
++            static int skip = -1, nseen;
++            static uint32_t seen[512][6];
++            static unsigned skipped;
++            uint32_t key[6];
++            int i;
++            key[0] = s_ff_texmat_en[0] | (s_ff_texmat_en[1] << 1)
++                   | (s_ff_texmat_en[2] << 2) | (s_ff_texmat_en[3] << 3)
++                   | (s_gpu.blend_enable << 4) | (s_gpu.alpha_test << 5);
++            key[1] = s_ff_texgen[0][0] ^ (s_ff_texgen[0][1] << 8)
++                   ^ (s_ff_texgen[1][0] << 16) ^ (s_ff_texgen[1][1] << 24);
++            key[2] = s_gpu.rc.stage_program;
++            key[3] = s_gpu.texs[0].offset;
++            key[4] = s_gpu.texs[1].offset;
++            key[5] = s_gpu.texs[0].color | (s_gpu.alpha_func << 8);
++            for (i = 0; i < nseen; i++)
++                if (!memcmp(seen[i], key, sizeof key))
++                    break;
++            if (i == nseen && nseen < 512) {
++                memcpy(seen[nseen++], key, sizeof key);
++                if (nseen <= 120)
++                    fprintf(stderr, "[FFTEX] #%d tm=%u%u%u%u tg0=%X,%X,%X,%X tg1=%X,%X"
++                            " blend=%u %X/%X atest=%u %X/%u prog=%05X"
++                            " t0=%08X f%02X %ux%u t1=%08X f%02X %ux%u"
++                            " uv0 s%u st%u uv1 s%u st%u skin %u n %u\n",
++                            nseen, s_ff_texmat_en[0], s_ff_texmat_en[1],
++                            s_ff_texmat_en[2], s_ff_texmat_en[3],
++                            s_ff_texgen[0][0], s_ff_texgen[0][1],
++                            s_ff_texgen[0][2], s_ff_texgen[0][3],
++                            s_ff_texgen[1][0], s_ff_texgen[1][1],
++                            s_gpu.blend_enable, s_gpu.blend_sfactor,
++                            s_gpu.blend_dfactor, s_gpu.alpha_test,
++                            s_gpu.alpha_func, s_gpu.alpha_ref & 0xFF,
++                            s_gpu.rc.stage_program,
++                            s_gpu.texs[0].offset, s_gpu.texs[0].color,
++                            s_gpu.texs[0].width, s_gpu.texs[0].height,
++                            s_gpu.texs[1].offset, s_gpu.texs[1].color,
++                            s_gpu.texs[1].width, s_gpu.texs[1].height,
++                            s_gpu.attr[9].size, s_gpu.attr[9].stride,
++                            s_gpu.attr[10].size, s_gpu.attr[10].stride,
++                            s_ff_skin, s_gpu.idx_count);
++                if (s_ff_texmat_en[0] || s_ff_texmat_en[1])
++                    fprintf(stderr, "[FFTEX]   tm0 %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
++                            s_ff_texmat[0][0], s_ff_texmat[0][1], s_ff_texmat[0][2], s_ff_texmat[0][3],
++                            s_ff_texmat[0][4], s_ff_texmat[0][5], s_ff_texmat[0][6], s_ff_texmat[0][7],
++                            s_ff_texmat[0][8], s_ff_texmat[0][9], s_ff_texmat[0][10], s_ff_texmat[0][11],
++                            s_ff_texmat[0][12], s_ff_texmat[0][13], s_ff_texmat[0][14], s_ff_texmat[0][15]);
++                fflush(stderr);
++            }
++            if (skip < 0)
++                skip = getenv("RECOMP_FF_SKIP_ALPHA") != NULL;
++            if (skip && (s_gpu.blend_enable || s_gpu.alpha_test)) {
++                if (++skipped == 1)
++                    fprintf(stderr, "[FFTEX] RECOMP_FF_SKIP_ALPHA active\n");
++                return;
++            }
 +        }
 +        s_ff_active = 1;
 +        raster_batch_program();
@@ -277,7 +493,7 @@ index c65632c..0a7e5bc 100644
          return;
      }
  
-@@ -2894,6 +2998,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -2894,6 +3137,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -293,7 +509,7 @@ index c65632c..0a7e5bc 100644
      if (s_ftrace == 2) {
          /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
           * less the bulk (vertex data, program and constant uploads). */
-@@ -3003,6 +3116,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3003,6 +3255,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -319,7 +535,38 @@ index c65632c..0a7e5bc 100644
          clear_surface(param);
          if (param & 0x01)                         /* Z */
              zbuf_clear();
-@@ -3212,6 +3344,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3053,12 +3324,29 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (!s_gpu.prim)
+             break;
+         for (i = 0; i < count && s_gpu.idx_count < NV_MAX_INDICES; i++)
+-            s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(start + i);
++            s_gpu.idx[s_gpu.idx_count++] = start + i;
+         break;
+     }
+ 
++    case 0x1808:                         /* [ix1] ARRAY_ELEMENT32: one index */
++        if (s_gpu.prim && s_gpu.idx_count < NV_MAX_INDICES) {
++            static unsigned n32;
++            if (n32 < 5) {
++                n32++;
++                fprintf(stderr, "[IDX] ARRAY_ELEMENT32 idx=%u at position %u\n",
++                        param, s_gpu.idx_count);
++            }
++            s_gpu.idx[s_gpu.idx_count++] = param;
++        }
++        break;
++
+     case NV097_ARRAY_ELEMENT16:
+         /* Two 16-bit indices per parameter word. */
++        if (s_gpu.prim && s_gpu.idx_count + 2 > NV_MAX_INDICES) {   /* [ix1] */
++            static int said;
++            if (!said++)
++                fprintf(stderr, "[IDX] index overflow at %u\n", s_gpu.idx_count);
++        }
+         if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
+             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
+             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
+@@ -3212,6 +3500,49 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * them -- so they are constants that happen to arrive by method.
           * Dropped, every vertex program put its whole batch at the origin:
           * no 3D anywhere, and a black car on the garage screen. */
@@ -334,6 +581,36 @@ index c65632c..0a7e5bc 100644
 +        }
 +        if (method >= 0x0680 && method < 0x06C0) {    /* SET_COMPOSITE_MATRIX */
 +            memcpy(&s_ff_cmat[(method - 0x0680) / 4], &param, 4);
++            break;
++        }
++        if (method >= 0x0420 && method < 0x0430) {    /* [ff2] TEXTURE_MATRIX_ENABLE(i) */
++            s_ff_texmat_en[(method - 0x0420) / 4] = param;
++            break;
++        }
++        if (method >= 0x03C0 && method < 0x0400) {    /* [ff2] TEXGEN_S/T/R/Q(i) */
++            s_ff_texgen[(method - 0x03C0) / 16][((method - 0x03C0) / 4) & 3] = param;
++            break;
++        }
++        if (method >= 0x06C0 && method < 0x07C0) {    /* [ff2] TEXTURE_MATRIX(i) */
++            uint32_t e = (method - 0x06C0) / 4;
++            memcpy(&s_ff_texmat[e / 16][e % 16], &param, 4);
++            break;
++        }
++        if (method == 0x0330 || method == 0x0334 || method == 0x0338
++            || method == 0x0384 || method == 0x0388) {    /* [zf2] poly offset */
++            static uint32_t last[0x60 / 4], n;
++            uint32_t s = (method - 0x0330) / 4;
++            if (method == 0x0384) memcpy(&s_pofs_scale, &param, 4);
++            else if (method == 0x0388) memcpy(&s_pofs_bias, &param, 4);
++            else s_pofs_en[(method - 0x0330) / 4] = param;
++            if (last[s] != param && n < 40) {
++                float f;
++                memcpy(&f, &param, 4);
++                n++;
++                fprintf(stderr, "[POFS] m=%04X p=%08X (%g)\n", method, param, f);
++                fflush(stderr);
++            }
++            last[s] = param;
 +            break;
 +        }
          if (method >= 0x0A20 && method < 0x0A30) {
