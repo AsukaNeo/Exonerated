@@ -1,0 +1,33 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Deathrow",
+  "wikidata": "Q5247700",
+  "system": "Xbox",
+  "type": "recomp",
+  "original": {
+    "region": "USA",
+    "revision": "3",
+    "serial": "US-004",
+    "sha1": "34ef43c83ffa6860019edc4fc183241107a11ed2"
+  },
+  "project": "Exonerated",
+  "status": "in-progress",
+  "targets": [
+    "Windows"
+  ],
+  "toolchain": "Xboxrecomp",
+  "approach": "Static recompilation of the XBE to C with xboxrecomp; software NV2A rasteriser with fixed-function T&L",
+  "maintainers": [
+    {
+      "name": "AsukaNeo",
+      "link": "https://github.com/AsukaNeo"
+    }
+  ],
+  "help": [
+    "Rasteriser speed (register combiners, texture sampling)",
+    "Player texture artifacts",
+    "NV2A fixed-function lighting",
+    "Audio (APU / DirectSound)"
+  ],
+  "notes": "Boots to the menus and plays a full match end to end: team select, kickoff, replays, back to the main menu. Software rendering runs at roughly 8-9 fps in a match. Fixed-function draw calls are now rendered, which restored the players' lower bodies. Next: rendering speed, jersey texture artifacts, lighting, audio."
+}
