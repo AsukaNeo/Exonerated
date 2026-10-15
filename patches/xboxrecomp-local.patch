@@ -1,0 +1,439 @@
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index c65ba43..04c2f57 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -266,6 +266,36 @@ static void kernel_data_init(void)
+         }
+     }
+ 
++    /* Relaunch hand-off: when the title quick-reboots into itself
++     * (XLaunchNewImage with an empty path), the previous process saves its
++     * launch data page to relaunch.bin next to the exe and starts this one.
++     * Restore the page so XGetLaunchInfo sees what the title passed itself. */
++    {
++        char lp[MAX_PATH];
++        DWORD ln = GetModuleFileNameA(NULL, lp, MAX_PATH - 16);
++        FILE *lf;
++
++        while (ln && lp[ln - 1] != '\\' && lp[ln - 1] != '/') ln--;
++        lp[ln] = 0;
++        strcat(lp, "relaunch.bin");
++        lf = fopen(lp, "rb");
++        if (lf) {
++            uint32_t page = xbox_HeapAlloc(0x1000 + 0x0C00, 4096);
++            if (page) {
++                static uint8_t buf[4096];
++                size_t n = fread(buf, 1, sizeof(buf), lf);
++                uint32_t i;
++                for (i = 0; i < (uint32_t)n; i++)
++                    BRIDGE_MEM8(page + i) = buf[i];
++                BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = page;
++                fprintf(stderr, "  Launch data: restored %u bytes from relaunch.bin at 0x%08X (type=%u)\n",
++                        (unsigned)n, page, BRIDGE_MEM32(page));
++            }
++            fclose(lf);
++            remove(lp);
++        }
++    }
++
+     /* Object-type exports. Each gets a DISTINCT non-zero value rather than 0.
+      *
+      * They were all zero, which is wrong twice over: a title that null-checks
+@@ -1374,6 +1404,51 @@ static void bridge_HalReturnToFirmware(void)
+                     waited);
+     }
+ 
++    /* Relaunch: a quick reboot with a launch data page and an empty path is
++     * the title restarting itself (menu -> game). Save the page, run a fresh
++     * copy of this executable on the same log handles, exit with its code.
++     * RECOMP_RELAUNCH=0 disables. */
++    {
++        const char *rl = getenv("RECOMP_RELAUNCH");
++        uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
++
++        if (routine == 2 && page && BRIDGE_MEM32(page) == 0 && BRIDGE_MEM8(page + 8) == 0 && !(rl && *rl == '0')) {
++            char lp[MAX_PATH];
++            DWORD ln = GetModuleFileNameA(NULL, lp, MAX_PATH - 16);
++            FILE *lf;
++
++            while (ln && lp[ln - 1] != '\\' && lp[ln - 1] != '/') ln--;
++            lp[ln] = 0;
++            strcat(lp, "relaunch.bin");
++            lf = fopen(lp, "wb");
++            if (lf) {
++                STARTUPINFOA si;
++                PROCESS_INFORMATION pi;
++                DWORD code = 0;
++                uint32_t i;
++
++                for (i = 0; i < 4096; i++)
++                    fputc(BRIDGE_MEM8(page + i), lf);
++                fclose(lf);
++                memset(&si, 0, sizeof(si));
++                si.cb = sizeof(si);
++                si.dwFlags = STARTF_USESTDHANDLES;
++                si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
++                si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
++                si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
++                fprintf(stderr, "  [KERNEL] relaunching title with saved launch data\n");
++                fflush(stderr); fflush(stdout);
++                if (CreateProcessA(NULL, GetCommandLineA(), NULL, NULL, TRUE, 0,
++                                   NULL, NULL, &si, &pi)) {
++                    WaitForSingleObject(pi.hProcess, INFINITE);
++                    GetExitCodeProcess(pi.hProcess, &code);
++                    ExitProcess(code);
++                }
++                fprintf(stderr, "  [KERNEL] relaunch failed (%lu)\n", GetLastError());
++            }
++        }
++    }
++
+     xbox_HalReturnToFirmware(routine);
+ }
+ 
+@@ -2873,6 +2948,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
+     return (HANDLE)(uintptr_t)token;
+ }
+ 
++/* Exported for HLE wrappers: token -> native HANDLE, slot left intact. */
++void *xbox_ResolveHandleToken(uint32_t token) { return (void *)bridge_resolve_handle(token); }
++
+ static HANDLE bridge_take_handle(uint32_t token)
+ {
+     if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
+@@ -9796,3 +9874,17 @@ void xbox_kernel_bridge_init(void)
+             KERNEL_VA_BASE, KERNEL_VA_BASE + (resolved - 1) * 4);
+ 
+ }
++
++
++int xbox_g_dump_paths = 0;
++/* DIAG: print guest stack words that point into game code (call-chain hint). */
++void xbox_DumpGuestStack(const char *tag)
++{
++    uint32_t sp = g_esp, i; int n = 0;
++    fprintf(stderr, "[GSTACK] tid=%lu esp=%08X %s:", GetCurrentThreadId(), sp, tag);
++    for (i = 0; i < 0x1000 && n < 40; i += 4) {
++        uint32_t v = BRIDGE_MEM32(sp + i);
++        if (v >= 0x11000u && v < 0x24A888u) { fprintf(stderr, " %08X", v); n++; }
++    }
++    fprintf(stderr, "\n"); fflush(stderr);
++}
+diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
+index caf6390..a91c961 100644
+--- a/src/kernel/kernel_path.c
++++ b/src/kernel/kernel_path.c
+@@ -1,3 +1,4 @@
++#include <string.h>
+ /*
+  * kernel_path.c - Xbox device-path translation
+  *
+@@ -437,6 +438,8 @@ translate:
+     if (g_xbox_path_hook)
+         g_xbox_path_hook(xbox_path);
+     fprintf(stderr, "  [PATH] %s\n", xbox_path);
++    { extern void xbox_DumpGuestStack(const char *); extern int xbox_g_dump_paths; static int sp_n;
++      if (xbox_g_dump_paths && sp_n++ < 10) xbox_DumpGuestStack(xbox_path); }
+     fflush(stderr);
+     {
+         WCHAR remainder_wide[MAX_PATH];
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index c65632c..0a7e5bc 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -2098,6 +2098,84 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+  * check, which is correct, just slower for huge off-screen triangles. */
+ #define NV_CLIP_W 1e-3f
+ 
++/* Deathrow: NV2A fixed-function transform, after xemu vsh-ff.c, so batches
++ * drawn without a vertex program are rasterised instead of skipped. Position
++ * follows the hardware: composite matrix, or skinning through MODEL_VIEW 0-3
++ * and then the composite; xy divided by w plus the viewport offset. Lighting,
++ * texgen and texture matrices are not modelled yet: colour is the vertex
++ * diffuse (white when absent) and texcoords pass through.
++ * RECOMP_NO_FF=1 restores the old skip. */
++static float s_ff_mv[4][16], s_ff_cmat[16];
++static uint32_t s_ff_skin;
++static int s_ff_active;
++static unsigned s_ff_batches;
++
++static int s_ff_tr = -1;          /* RECOMP_FF_TRANSPOSE=1: other matrix order */
++
++static void ff_mul(const float m[16], const float v[4], float r[4])
++{
++    int j;
++    if (s_ff_tr < 0)
++        s_ff_tr = getenv("RECOMP_FF_TRANSPOSE") != NULL;
++    if (s_ff_tr) {
++        for (j = 0; j < 4; j++)
++            r[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
++        return;
++    }
++    for (j = 0; j < 4; j++)
++        r[j] = v[0] * m[4 * j] + v[1] * m[4 * j + 1]
++             + v[2] * m[4 * j + 2] + v[3] * m[4 * j + 3];
++}
++
++static int ff_transform_vertex(uint32_t index, Nv2aVshOutput *out)
++{
++    static const int cnt[7] = {0, 2, 2, 3, 3, 4, 4}, mix[7] = {0, 1, 0, 1, 0, 1, 0};
++    float pos[4], wt[4], eye[4], clip[4], t[4], w, wsum = 1.0f;
++    const float *o = nv2a_vsh_constant(59);            /* VIEWPORT_OFFSET */
++    uint32_t sk = s_ff_skin < 7 ? s_ff_skin : 0;
++    int k, j, n = cnt[sk];
++
++    memset(out, 0, sizeof *out);
++    fetch_attr(&s_gpu.attr[0], index, pos);
++    if (n == 0) {
++        ff_mul(s_ff_mv[0], pos, eye);
++        ff_mul(s_ff_cmat, pos, clip);
++    } else {
++        fetch_attr(&s_gpu.attr[1], index, wt);
++        eye[0] = eye[1] = eye[2] = eye[3] = 0.0f;
++        for (k = 0; k < n; k++) {
++            float wk;
++            if (mix[sk] && k == n - 1)
++                wk = wsum;                   /* last weight makes the sum 1 */
++            else {
++                wk = wt[k];
++                wsum -= wk;
++            }
++            ff_mul(s_ff_mv[k], pos, t);
++            for (j = 0; j < 4; j++)
++                eye[j] += t[j] * wk;
++        }
++        ff_mul(s_ff_cmat, eye, clip);
++    }
++    w = clip[3];                                       /* clampAwayZeroInf */
++    if (w >= 0.0f)
++        w = w < 5.421011e-20f ? 5.421011e-20f : (w > 1.844674e19f ? 1.844674e19f : w);
++    else
++        w = w > -5.421011e-20f ? -5.421011e-20f : (w < -1.844674e19f ? -1.844674e19f : w);
++    out->pos[0] = clip[0] / w + o[0];
++    out->pos[1] = clip[1] / w + o[1];
++    out->pos[2] = clip[2] / w;
++    out->pos[3] = w;
++    if (!fetch_attr(&s_gpu.attr[3], index, out->d0))
++        out->d0[0] = out->d0[1] = out->d0[2] = out->d0[3] = 1.0f;
++    if (!fetch_attr(&s_gpu.attr[4], index, out->d1))
++        out->d1[0] = out->d1[1] = out->d1[2] = out->d1[3] = 0.0f;
++    for (k = 0; k < 4; k++)
++        fetch_attr(&s_gpu.attr[9 + k], index, out->tex[k]);
++    out->fog[0] = out->fog[1] = out->fog[2] = out->fog[3] = fabsf(eye[2]);
++    return 1;
++}
++
+ static void xf_to_clip(const Nv2aVshOutput *v, const float k[3],
+                        const float o[3], float c[3])
+ {
+@@ -2137,6 +2215,10 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+         const float *sc = nv2a_vsh_constant(58), *of = nv2a_vsh_constant(59);
+         for (i = 0; i < 3; i++) { k[i] = sc[i]; o[i] = of[i]; }
+     }
++    if (s_ff_active) {           /* composite already scaled: undo offset only */
++        k[0] = k[1] = k[2] = 1.0f;
++        o[2] = 0.0f;
++    }
+     in[0] = a; in[1] = b; in[2] = c;
+     for (i = 0; i < 3; i++) {
+         const Nv2aVshOutput *p = in[i], *q = in[(i + 1) % 3];
+@@ -2181,7 +2263,8 @@ static void raster_batch_program(void)
+     uint32_t i, n = s_gpu.idx_count;
+ 
+     for (i = 0; i < n; i++)
+-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
++        if (!(s_ff_active ? ff_transform_vertex(s_gpu.idx[i], &s_xf[i])
++                          : transform_vertex(s_gpu.idx[i], &s_xf[i])))
+             return;                                    /* no program loaded */
+     s_gpu.batches_program++;
+     s_gpu.verts_program += n;
+@@ -2290,7 +2373,28 @@ static void raster_batch(void)
+         return;
+     }
+     if (!batch_is_screen_space()) {
+-        s_gpu.batches_untransformed++;
++        static int no_ff = -1;
++        if (no_ff < 0)
++            no_ff = getenv("RECOMP_NO_FF") != NULL;
++        if (no_ff) {
++            s_gpu.batches_untransformed++;
++            return;
++        }
++        s_ff_active = 1;
++        raster_batch_program();
++        s_ff_active = 0;
++        if (++s_ff_batches <= 3 || (s_ff_batches % 20000) == 0) {
++            float p[4];
++            fetch_attr(&s_gpu.attr[0], s_gpu.idx[0], p);
++            fprintf(stderr, "[FF] #%u skin %u prim %u n %u xfmode %u attr0 t%u s%u st%u cmask %08X | in %g %g %g %g -> out %g %g %g w %g\n",
++                    s_ff_batches, s_ff_skin, s_gpu.prim, s_gpu.idx_count, s_gpu.xf_mode,
++                    s_gpu.attr[0].type, s_gpu.attr[0].size, s_gpu.attr[0].stride, s_gpu.color_mask,
++                    p[0], p[1], p[2], p[3], s_xf[0].pos[0], s_xf[0].pos[1], s_xf[0].pos[2], s_xf[0].pos[3]);
++            fprintf(stderr, "[FF]   cmat %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
++                    s_ff_cmat[0], s_ff_cmat[1], s_ff_cmat[2], s_ff_cmat[3], s_ff_cmat[4], s_ff_cmat[5],
++                    s_ff_cmat[6], s_ff_cmat[7], s_ff_cmat[8], s_ff_cmat[9], s_ff_cmat[10], s_ff_cmat[11],
++                    s_ff_cmat[12], s_ff_cmat[13], s_ff_cmat[14], s_ff_cmat[15]);
++        }
+         return;
+     }
+ 
+@@ -2894,6 +2998,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                     subch, method, param);
+     }
+ 
++    {
++        /* RECOMP_FTRACE_ALWAYS: trace methods with no flip to start it, for
++         * titles that never send FLIP_STALL. */
++        static int fta = -1;
++        if (fta < 0)
++            fta = getenv("RECOMP_FTRACE_ALWAYS") != NULL;
++        if (fta)
++            s_ftrace = 2;
++    }
+     if (s_ftrace == 2) {
+         /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
+          * less the bulk (vertex data, program and constant uploads). */
+@@ -3003,6 +3116,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
+                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
+                     s_gpu.clear_color, 10);
++        {
++            /* RECOMP_PRESENT_ON_CLEAR: a title that never sends FLIP_STALL
++             * clears its colour buffer at the top of every frame; just before
++             * that clear the buffer holds the last frame whole. */
++            static int poc = -1;
++            static uint32_t draws_at_present;
++            if (poc < 0)
++                poc = getenv("RECOMP_PRESENT_ON_CLEAR") != NULL;
++            if (poc && (param & 0xF0) && s_gpu.pitch && s_gpu.color_offset
++                    && s_gpu.draws != draws_at_present) {
++                extern void xbox_FramebufferWindowFrameStats(uint32_t);
++                extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
++                xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_present);
++                draws_at_present = s_gpu.draws;
++                xbox_FramebufferWindowSet(dma_resolve(s_gpu.color_offset), s_gpu.pitch);
++                xbox_FramebufferWindowPresent(dma_resolve(s_gpu.color_offset), s_gpu.pitch);
++                s_gpu.flips++;
++            }
++        }
+         clear_surface(param);
+         if (param & 0x01)                         /* Z */
+             zbuf_clear();
+@@ -3212,6 +3344,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+          * them -- so they are constants that happen to arrive by method.
+          * Dropped, every vertex program put its whole batch at the origin:
+          * no 3D anywhere, and a black car on the garage screen. */
++        if (method == 0x0328) {                        /* SET_SKIN_MODE */
++            s_ff_skin = param;
++            break;
++        }
++        if (method >= 0x0480 && method < 0x0580) {    /* SET_MODEL_VIEW_MATRIX 0-3 */
++            uint32_t e = (method - 0x0480) / 4;
++            memcpy(&s_ff_mv[e / 16][e % 16], &param, 4);
++            break;
++        }
++        if (method >= 0x0680 && method < 0x06C0) {    /* SET_COMPOSITE_MATRIX */
++            memcpy(&s_ff_cmat[(method - 0x0680) / 4], &param, 4);
++            break;
++        }
+         if (method >= 0x0A20 && method < 0x0A30) {
+             nv2a_vsh_constant_component(59, (method - 0x0A20) / 4, param);
+             break;
+diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
+index 65bbedb..3ea581c 100644
+--- a/src/kernel/nv2a_pb_scan.c
++++ b/src/kernel/nv2a_pb_scan.c
+@@ -42,6 +42,7 @@ static int s_seen_count;
+  * looking method numbers out of parameter data, and the counts then describe
+  * nothing. Unrecognised words are the tell. */
+ static uint32_t s_tot_words, s_tot_unknown, s_tot_jumps, s_tot_segments;
++volatile uint32_t g_pb_walk_va, g_pb_walk_word, g_pb_walk_method, g_pb_walk_count;
+ static uint32_t s_tot_calls;
+ 
+ /* Executing is opt-in separately from surveying: a survey is read-only, while
+@@ -171,6 +172,7 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
+ 
+     while (va < end_va && words < 0x100000u) {
+         uint32_t w = *(const uint32_t *)(mem + va);
++        g_pb_walk_va = va; g_pb_walk_word = w; g_pb_walk_count++;
+         va += 4;
+         words++;
+ 
+@@ -206,6 +208,7 @@ static uint32_t pb_walk(uint32_t va, uint32_t end_va, int in_call,
+             for (uint32_t i = 0; i < count && va < end_va; i++) {
+                 uint32_t m = noninc ? method : method + i * 4;
+                 note(subch, m);
++                g_pb_walk_method = (subch << 16) | m; g_pb_walk_count++;
+                 /* Same walk, two consumers: the survey counts, the executor
+                  * acts. Keeping them on one decode means they can never
+                  * disagree about what the stream said. */
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 72d5131..b2929e1 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -180,6 +180,7 @@ static volatile LONG g_nv2a_ack_stop = 0;
+  */
+ static const struct { uint32_t offset; uint32_t busy_mask; } NV2A_ACK[] = {
+     { 0x100410, 0x00010000u },  /* PFB flush kick, Halo 0x001EF930 */
++    { 0x008700, 0x00000011u },  /* PVIDEO_BUFFER: overlay stop completes (Deathrow 0x00233291) */
+ 
+     /* Interrupt status registers. These are write-1-to-clear on hardware, so
+      * an ISR "clearing" one writes the pending bit back -- against plain RAM
+@@ -1130,6 +1131,17 @@ extern volatile uint32_t g_icall_trace_idx;
+ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+                               uint32_t edi0, uint32_t esp0)
+ {
++    {   /* Deathrow: first returns that leave the guest stack in the image. */
++        static int dr_n;
++        if (g_esp < 0x00700000u && esp0 >= 0x00700000u && dr_n < 20) {
++            dr_n++;
++            fprintf(stderr, "[ESPJUMP] callee=%08X ra=%08X esp %08X -> %08X\n",
++                    va, *(const uint32_t *)((const uint8_t *)g_xbox_mem_offset + esp0),
++                    esp0, g_esp);
++            fflush(stderr);
++        }
++    }
++
+     enum { SLOTS = 32 };
+     static uint32_t seen[SLOTS];
+     static uint64_t hits[SLOTS];
+@@ -1645,6 +1657,17 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+                 WD_NV2A(NV2A_PFIFO_DMA_PUT), WD_NV2A(NV2A_PFIFO_DMA_GET),
+                 WD_NV2A(NV2A_PFIFO_REF), WD_NV2A(NV2A_PFIFO_DMA_SUBROUTINE));
+ #undef WD_NV2A
++        {
++            extern volatile uint32_t g_pb_walk_va, g_pb_walk_word,
++                                     g_pb_walk_method, g_pb_walk_count;
++            int k;
++            for (k = 0; k < 2; k++) {
++                fprintf(stderr, "  [PB] walker va=%08X word=%08X method=%u:%04X steps=%u\n",
++                        g_pb_walk_va, g_pb_walk_word, g_pb_walk_method >> 16,
++                        g_pb_walk_method & 0xFFFF, g_pb_walk_count);
++                if (!k) Sleep(500);
++            }
++        }
+     }
+ 
+     for (i = 0; i < 400 && esp; i++) {
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index 08bae4b..a45a615 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -79,7 +79,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+         const uint8_t *row = src + (size_t)y * pitch;
+         uint32_t *dst = s_present[next] + (size_t)y * s_fb_width;
+ 
+-        if (bpp == 4) {
++        if (bpp >= 4) {   /* a pitch wider than width*4 still holds 4-byte pixels */
+             memcpy(dst, row, (size_t)s_fb_width * 4);
+         } else if (bpp == 2) {
+             const uint16_t *p = (const uint16_t *)row;
+@@ -195,7 +195,7 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+         const uint8_t *row = src + (size_t)y * s_fb_pitch;
+         uint32_t *dst = s_rgb + (size_t)y * s_fb_width;
+ 
+-        if (bpp == 4) {
++        if (bpp >= 4) {   /* a pitch wider than width*4 still holds 4-byte pixels */
+             memcpy(dst, row, (size_t)s_fb_width * 4);
+         } else if (bpp == 2) {
+             const uint16_t *p = (const uint16_t *)row;

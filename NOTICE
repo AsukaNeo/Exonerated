@@ -1,0 +1,17 @@
+Exonerated
+Copyright (c) 2026 AsukaNeo. Licensed under the MIT License (see LICENSE).
+
+This project contains no game code, data or assets. It covers only original
+source files, scripts and a patch against xboxrecomp; you must supply your own
+legally obtained copy of the game.
+
+Builds on xboxrecomp by sp00nz and contributors (MIT):
+  https://github.com/sp00nznet/xboxrecomp
+  xboxrecomp itself includes LGPL-2.1-or-later components from xemu; see its
+  LICENSE, LICENSES/ and NOTICE files.
+
+The fixed-function transform and pixel-stage logic in
+patches/xboxrecomp-local.patch follow the design of xemu
+(hw/xbox/nv2a/pgraph/glsl/vsh-ff.c and psh.c, LGPL-2.1-or-later,
+Copyright (c) espes, Jannik Vogel, Matt Borgerson). Credit to the xemu project:
+  https://github.com/xemu-project/xemu

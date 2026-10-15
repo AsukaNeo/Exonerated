@@ -1,0 +1,25 @@
+# derived from the game: never commit
+src/recomp/gen/
+game_files/
+texdump/
+*.xbe
+*.iso
+*.bmp
+*.png
+*.jpg
+*.log
+prof*.txt
+prof.tmp
+# build output
+build/
+# local backups
+*.pre_*
+*.bak*
+*.broken
+*.no_hb
+*.cur
+*.refl_bad
+*.ff1
+# project art is allowed
+!assets/
+!assets/*.png
