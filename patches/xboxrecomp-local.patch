@@ -1,8 +1,46 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 1f664a3..06675c7 100644
+index 1f664a3..055544c 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
-@@ -235,6 +235,10 @@ extern APU_TLS uint32_t g_fs_base;
+@@ -25,6 +25,9 @@
+ #include "apu_wav.h"
+ #include "fpconv.h"
+ #include "../kernel/xbox_memory_layout.h"   /* XBOX_WORKER_STACK_TOP */
++#ifdef _WIN32
++#include <timeapi.h>                         /* [ap4] timeBeginPeriod */
++#endif
+ 
+ /* ============================================================
+  * Globals
+@@ -139,6 +142,18 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
+  * where the host mapped RAM) or "wrap" (above the mapping, folded into the
+  * low 64 MB). A voice reading noise from "wrap" or "hiwin" is the address
+  * resolution, not the decoder. */
++/* [ap5] Sample data: an image page the title named through
++ * MmGetPhysicalAddress is the image, even where the contiguous allocator
++ * handed out the same number (DirectSound's silence buffer in its DSOUND
++ * section). Everything else resolves as mcpx_apu_phys does. */
++uint8_t *mcpx_apu_phys_sample(uint64_t addr)
++{
++    uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
++    if (a < (64u << 20) && xbox_PhysImageNameMap()[a >> 12])
++        return g_apu_ram_ptr + a;
++    return mcpx_apu_phys(addr);
++}
++
+ const char *mcpx_apu_phys_class(uint64_t addr)
+ {
+     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
+@@ -146,6 +161,8 @@ const char *mcpx_apu_phys_class(uint64_t addr)
+         return a < apu_mapped_ram() ? "ram" : "wrap";
+     if (xbox_PhysRamNameMap()[a >> 12])
+         return "named";
++    if (xbox_PhysImageNameMap()[a >> 12])                 /* [ap5] */
++        return "imgname";
+     if (xbox_ContiguousPageMap()[a >> 12])
+         return "win";
+     if (a >= g_xbox_image_lo && a < g_xbox_image_hi)
+@@ -235,6 +252,10 @@ extern APU_TLS uint32_t g_fs_base;
   * while a guest thread sits at raised IRQL, which is when the single-CPU
   * console could not have taken the interrupt. The routine acknowledges by
   * writing ISTS, which drops the line through update_irq. */
@@ -13,7 +51,7 @@ index 1f664a3..06675c7 100644
  static void apu_deliver_irq(MCPXAPUState *d)
  {
      /* Per thread, like the g_fs_base it guards: a new instance's frame
-@@ -280,6 +284,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -280,6 +301,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
@@ -21,10 +59,38 @@ index 1f664a3..06675c7 100644
      {
          static unsigned n;
          if (n++ < 3) {
-@@ -1045,6 +1050,11 @@ static void apu_irq_stats_line(void)
+@@ -898,6 +920,11 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+  *
+  * A clock that has fallen more than a period behind (after a stall, or the
+  * first call) restarts from now instead of rendering the backlog in a burst. */
++/* [ap4] schedule restarts (the frame thread woke more than a period late)
++ * and the worst lateness seen, for the [APU-PACE] trace line. */
++static volatile long apu_ap4_resets;
++static volatile int64_t apu_ap4_late_max_us;
++
+ int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us)
+ {
+     int64_t ahead_us = 0;
+@@ -943,6 +970,12 @@ int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us)
+         d->pace_stalled = false;
+     }
+ 
++    if (d->next_frame_time_us != 0 &&
++        now_us - d->next_frame_time_us > EP_FRAME_US) {      /* [ap4] */
++        int64_t late = now_us - d->next_frame_time_us;
++        apu_ap4_resets++;
++        if (late > apu_ap4_late_max_us) apu_ap4_late_max_us = late;
++    }
+     if (d->next_frame_time_us == 0 ||
+         now_us - d->next_frame_time_us > EP_FRAME_US)
+         d->next_frame_time_us = now_us;
+@@ -1045,12 +1078,26 @@ static void apu_irq_stats_line(void)
          fprintf(stderr, "[APU-IRQ] traps %u se_frames %u fe-trapped-frames %u underruns %u\n",
                  apu_irq_stats.traps, apu_irq_stats.se_frames,
                  apu_irq_stats.fe_trapped_frames, xa2_underruns());
++    if (s_irq_next_ns)                                    /* [ap4] */
++        fprintf(stderr, "[APU-PACE] schedule resets %ld  (late by max %lld us)\n",
++                apu_ap4_resets, (long long)apu_ap4_late_max_us);
 +    if (s_irq_next_ns)                                    /* [ap2] */
 +        fprintf(stderr, "[APU-NTF] voice_off %ld  persist_empty %ld (last voice %ld)  "
 +                "seg_done %ld  irq claimed %ld declined %ld\n",
@@ -33,8 +99,53 @@ index 1f664a3..06675c7 100644
      s_irq_next_ns = now + 5000000000ull;
  }
  
+ static void *mcpx_apu_frame_thread(void *arg)
+ {
+     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
++#ifdef _WIN32
++    /* [ap4] The pacing waits are a few ms; at the default 15.6 ms timer
++     * tick each one oversleeps by up to a period and more, pace_step
++     * restarts the late schedule, and the APU ran ~10 % slow. */
++    timeBeginPeriod(1);
++#endif
+     qemu_mutex_lock(&d->lock);
+ 
+     while (!qatomic_read(&d->exiting)) {
+@@ -1177,6 +1224,9 @@ static void *mcpx_apu_frame_thread(void *arg)
+     }
+ 
+     qemu_mutex_unlock(&d->lock);
++#ifdef _WIN32
++    timeEndPeriod(1);                                     /* [ap4] */
++#endif
+     return NULL;
+ }
+ 
+diff --git a/src/apu/apu_shim.h b/src/apu/apu_shim.h
+index 5f3f665..b247bc9 100644
+--- a/src/apu/apu_shim.h
++++ b/src/apu/apu_shim.h
+@@ -117,6 +117,18 @@ static inline uint8_t ldub_phys(void *as, hwaddr addr) {
+     return *(uint8_t *)mcpx_apu_phys(addr);
+ }
+ 
++/* [ap5] Sample-data reads (voice_get_samples): see mcpx_apu_phys_sample. */
++uint8_t *mcpx_apu_phys_sample(uint64_t addr);
++static inline uint32_t ldl_le_sample(hwaddr addr) {
++    return *(uint32_t *)mcpx_apu_phys_sample(addr);
++}
++static inline uint16_t lduw_le_sample(hwaddr addr) {
++    return *(uint16_t *)mcpx_apu_phys_sample(addr);
++}
++static inline uint8_t ldub_sample(hwaddr addr) {
++    return *(uint8_t *)mcpx_apu_phys_sample(addr);
++}
++
+ /* Little-endian physical memory writes */
+ static inline void stl_le_phys(void *as, hwaddr addr, uint32_t val) {
+     (void)as;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 128d86f..81bdb5c 100644
+index 128d86f..96a9342 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -47,6 +47,10 @@ static const struct {
@@ -64,6 +175,48 @@ index 128d86f..81bdb5c 100644
                  set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE +
                                    d->vp.ssl[v].ssl_index,
                                    NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
+@@ -1191,7 +1197,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 uint32_t linear_addr = block_index * (uint32_t)block_size;
+                 if (stream) {
+                     hwaddr addr = segment_offset + linear_addr;
+-                    memcpy(adpcm_block, mcpx_apu_phys(addr),
++                    memcpy(adpcm_block, mcpx_apu_phys_sample(addr),   /* [ap5] */
+                            block_size);
+                 } else {
+                     linear_addr += ba;
+@@ -1200,7 +1206,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                         hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
+                                                    0xFFFFFFFF, linear_addr);
+                         adpcm_block[word_index] =
+-                            ldl_le_phys(address_space_memory, addr);
++                            ldl_le_sample(addr);                 /* [ap5] */
+                         linear_addr += 4;
+                     }
+                 }
+@@ -1230,19 +1236,19 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 float fval;
+                 switch (sample_size) {
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
+-                    ival = ldub_phys(address_space_memory, addr);
++                    ival = ldub_sample(addr);                    /* [ap5] */
+                     fval = uint8_to_float((uint8_t)(ival & 0xff));
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16:
+-                    ival = lduw_le_phys(address_space_memory, addr);
++                    ival = lduw_le_sample(addr);                 /* [ap5] */
+                     fval = int16_to_float((int16_t)(ival & 0xffff));
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24:
+-                    ival = ldl_le_phys(address_space_memory, addr);
++                    ival = ldl_le_sample(addr);                  /* [ap5] */
+                     fval = int24_to_float(ival);
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S32:
+-                    ival = ldl_le_phys(address_space_memory, addr);
++                    ival = ldl_le_sample(addr);                  /* [ap5] */
+                     fval = int32_to_float(ival);
+                     break;
+                 default:
 @@ -1276,6 +1282,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  int next_index = (ssl_index + 1) % 2;
                  d->vp.ssl[v].ssl_index = next_index;
@@ -2410,7 +2563,7 @@ index c3fba75..a6712da 100644
 +    return 0;
 +}
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 362cefe..ef36ad0 100644
+index 362cefe..1ecb7ca 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -438,6 +438,7 @@ static volatile LONG g_nv2a_ack_stop = 0;
@@ -2632,6 +2785,54 @@ index 362cefe..ef36ad0 100644
      contig_unlock();
      return 1;
  }
+@@ -4254,11 +4385,20 @@ uint32_t xbox_ContiguousInUseBytes(void)
+  * naming it and frees it after stopping the voice, so a stale read costs at
+  * most one pass of one voice. */
+ static volatile uint8_t g_phys_ram_named[CONTIG_PAGES];
++/* [ap5] Image pages named the same way. DirectSound plays a silence buffer
++ * in its own section; read from the window copy of that page number it
++ * played live memory as PCM. Never cleared: the image is never freed. Only
++ * sample fetches consult it (mcpx_apu_phys_sample), so a window page with
++ * the same number still serves the APU's structures. */
++static volatile uint8_t g_phys_image_named[CONTIG_PAGES];
+ 
+ void xbox_PhysNoteRamName(uint32_t va)
+ {
+     if (va >= XBOX_HEAP_BASE && va < XBOX_HEAP_TOP && va < XBOX_CONTIG_SIZE)
+         g_phys_ram_named[va / CONTIG_PAGE] = 1;
++    else if (va >= g_xbox_image_lo && va < g_xbox_image_hi &&
++             va < XBOX_CONTIG_SIZE)                          /* [ap5] */
++        g_phys_image_named[va / CONTIG_PAGE] = 1;
+ }
+ 
+ /* Heap block m is free (and merged with any free neighbours): its pages name
+@@ -4307,6 +4447,11 @@ const volatile uint8_t *xbox_PhysRamNameMap(void)
+     return g_phys_ram_named;
+ }
+ 
++const volatile uint8_t *xbox_PhysImageNameMap(void)          /* [ap5] */
++{
++    return g_phys_image_named;
++}
++
+ 
+ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment);
+ 
+diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
+index 14eee45..de6b7cf 100644
+--- a/src/kernel/xbox_memory_layout.h
++++ b/src/kernel/xbox_memory_layout.h
+@@ -214,6 +214,10 @@ void xbox_PhysNoteRamName(uint32_t va);
+  * no live heap block covers the page any more. Read without a lock; a device
+  * model's view. */
+ const volatile uint8_t *xbox_PhysRamNameMap(void);
++/* [ap5] One byte per 4 KB page below 64 MB, nonzero once the title named an
++ * image page there through MmGetPhysicalAddress. Never cleared. For sample
++ * data only (mcpx_apu_phys_sample); see xbox_PhysNoteRamName. */
++const volatile uint8_t *xbox_PhysImageNameMap(void);
+ uint32_t xbox_ContiguousInUseBytes(void);
+ 
+ int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
 index d45d8bb..62b7690 100644
 --- a/src/usb/ohci.c
