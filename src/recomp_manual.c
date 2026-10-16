@@ -212,85 +212,190 @@ void recomp_unimpl(const char *text, uint32_t va)
 /* Deathrow input bridge (HLE): XPP opens the emulated pad but never accepts
  * its USB reports (packet stays 0), so after the real XInputGetState
  * (sub_002444AC, stdcall (handle, XINPUT_STATE*)) fill the state from the
- * host: keyboard on the game window (RECOMP_KEYBOARD=1) or an XInput pad. */
+ * host: keyboard on the game window (RECOMP_KEYBOARD=1) or an XInput pad.
+ *
+ * The game's pad loop (sub_001500E0) keeps one 0x54-byte record per port at
+ * 0x26D2C0, XInputOpen's handle first; the handle passed here is looked up
+ * there, and the n-th open port (in port order) reads host pad n, the n-th
+ * connected XInput pad (xboxrecomp xinput_device.c):
+ *
+ *   PC pad (XInput)    Xbox             PC pad (XInput)    Xbox
+ *   A B X Y            A B X Y          LT / RT            L / R trigger
+ *   LB                 White            Left stick         left stick
+ *   RB                 Black            Right stick        right stick
+ *   Start / Back       Start / Back     LS / RS click      L / R thumb
+ *   D-pad              D-pad
+ *
+ * Face buttons and Black/White are pressure bytes on the Xbox; an XInput pad
+ * gives 0 or 255. Sticks pass through unchanged (+Y is up on both); the game
+ * applies its own dead zone, and RECOMP_PAD_DEADZONE adds one on the host.
+ * Only as many ports exist as RECOMP_USB_PADS plugs in (play.sh: 1). The
+ * emulated pad lands on root port RECOMP_USB_PORT, and XAPI numbers root
+ * ports 3 4 1 2 as players 1-4, so RECOMP_USB_NDP=4 RECOMP_USB_PORT=2
+ * makes it player 1. Some game code reads only player 1's record.
+ * Rumble is not forwarded: the game's XInputSetState (sub_0024451B) goes out
+ * as a USB output report, and the OHCI model drops those. */
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t xbox_InputGetState(uint32_t port, void *state);
 extern void sub_002444AC_gen(void);
 #pragma pack(push, 2)
 typedef struct { uint32_t packet; uint16_t buttons; uint8_t analog[8]; int16_t thumb[4]; } DrInput;
 #pragma pack(pop)
+#define DR_PAD_RECORDS 0x26D2C0u   /* 4 x 0x54, handle at +0 */
+
+/* What [INPUT] logs a change of: the buttons, which analog bytes are past
+ * the console's press threshold, and each stick axis as -1/0/+1 at half
+ * throw -- enough to check a mapping without a line per frame. */
+static uint32_t dr_input_sig(const DrInput *s, uint32_t *sticks)
+{
+    uint32_t a = 0, k = 0;
+    int i;
+    for (i = 0; i < 8; i++)
+        if (s->analog[i] > 30)
+            a |= 1u << i;
+    for (i = 0; i < 4; i++)
+        k |= (uint32_t)(s->thumb[i] > 16384 ? 1 : s->thumb[i] < -16384 ? 2 : 0) << (2 * i);
+    *sticks = k;
+    return (uint32_t)s->buttons | a << 16;
+}
+
 void sub_002444AC(void)
 {
-    static uint32_t packet;
-    static DrInput last;
+    static uint32_t packet[4];
+    static DrInput last[4];
+    static uint32_t last_sig[4], last_sticks[4];
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+    uint32_t handle = *(uint32_t *)(mem + g_esp + 4);
     uint32_t ps = *(uint32_t *)(mem + g_esp + 8);
+    uint32_t port, rank = 0, sig, sticks, rc;
+    static uint32_t shown_ports;        /* bit n: port n's mapping logged */
+    /* The host fills an XBOX_INPUT_STATE, which is 24 bytes with its tail
+     * padding; DrInput is the console's packed 22. */
+    union { DrInput s; uint8_t raw[24]; } hs;
     DrInput host;
 
     sub_002444AC_gen();
     if (g_eax != 0)
         return;                         /* device really gone: leave the error */
-    memset(&host, 0, sizeof(host));
-    if (xbox_InputGetState(0, &host) != 0)
-        return;
-    if (memcmp(&host.buttons, &last.buttons, sizeof(host) - 4) != 0) {
-        packet++;
-        if (host.buttons || host.analog[0])
-            fprintf(stderr, "[INPUT] -> game: buttons=%04X A=%02X\n",
-                    host.buttons, host.analog[0]);
+    /* port = the game's port for this handle; rank = how many open ports
+     * come before it, which picks the host pad. The emulated pad sits on
+     * HC0 root port 1, which XAPI numbers port 2, so a lone pad is the
+     * game's port 2 and must still read host pad 0. */
+    for (port = 0; port < 4; port++) {
+        uint32_t h = *(uint32_t *)(mem + DR_PAD_RECORDS + port * 0x54u);
+        if (h == handle)
+            break;
+        if (h)
+            rank++;
     }
-    last = host;
-    host.packet = packet;
+    if (port == 4)
+        port = rank = 0;                /* not from the pad loop: player 1 */
+    memset(&hs, 0, sizeof(hs));
+    rc = xbox_InputGetState(rank, &hs);
+    host = hs.s;
+    if (!(shown_ports & 1u << port)) {
+        shown_ports |= 1u << port;
+        fprintf(stderr, "[INPUT] game port %u (handle %08X) <- host pad %u, rc %08X\n",
+                port, handle, rank, rc);
+    }
+    if (rc != 0)
+        return;
+    if (memcmp(&host.buttons, &last[port].buttons, sizeof(host) - 4) != 0)
+        packet[port]++;
+    sig = dr_input_sig(&host, &sticks);
+    if (sig != last_sig[port] || sticks != last_sticks[port]) {
+        fprintf(stderr, "[INPUT] port %u -> game: buttons=%04X "
+                "A B X Y Bk Wh LT RT=%02X %02X %02X %02X %02X %02X %02X %02X "
+                "L=%d,%d R=%d,%d\n", port, host.buttons,
+                host.analog[0], host.analog[1], host.analog[2], host.analog[3],
+                host.analog[4], host.analog[5], host.analog[6], host.analog[7],
+                host.thumb[0], host.thumb[1], host.thumb[2], host.thumb[3]);
+        last_sig[port] = sig;
+        last_sticks[port] = sticks;
+    }
+    last[port] = host;
+    host.packet = packet[port];
     memcpy(mem + ps, &host, sizeof(host));
 }
 
 /* Deathrow bring-up: who hammers sub_001C0BAE (DSOUND, thiscall) and what
  * it returns. Summary every 20M calls. */
 extern void sub_001C0BAE(void);
-extern void sub_001C08EC(void);
+extern void sub_001BF7FE(void);
 
 /* Deathrow probe (HLE hack): sub_001C1478 waits for the APU to confirm a
- * DirectSound voice stopped (busy bit 0x8000 at this+0x12). No APU confirms,
- * so poll a bounded number of times, then complete the stop ourselves.
+ * DirectSound voice stopped (busy bit 0x8000 at this+0x12), calling
+ * sub_001C0BAE until it does. The confirmation needs the APU frame thread
+ * (a frame every 0.67 ms) to process the stop and post its notification,
+ * and 1000 back-to-back polls are over in well under a millisecond, so the
+ * stop was forced nearly every time. Poll for up to DSWAIT_MS of real time,
+ * yielding between polls, so the title's own completion can arrive.
  *
- * Completing means what the stop notification's DPC does (0x1BFC5B ->
- * sub_001BF7FE): while the voice's node at +0x4C is still on its owner's
- * service list, call sub_001C08EC(1) (thiscall, ret 4). That splices the
- * voice out of the hardware voice list, unlinks the node and clears 0x8000.
- * Clearing only the bit (as before) left the voice on the service list and
- * in the hardware list: au22's voice 68 linked to itself, and au23 crashed
- * in the service loop at 0x1BF71A calling a method of the freed voice. */
+ * Only then complete the stop ourselves, and through what the stop
+ * notification's DPC calls (0x1BFC5B -> sub_001BF7FE(voice index), thiscall
+ * on the owner, ret 4) rather than sub_001C08EC(1) directly: sub_001BF7FE
+ * keeps its guards -- defer while the owner is inside a callback (+0x32C),
+ * leave a voice the hardware still runs, check that the slot's voice and
+ * handle are this one, and unlink only a node still on the service list.
+ * Called directly, au26 raced the DPC into a double unlink and gp5 crashed
+ * mid-match on a zeroed child-list link in sub_001C13E6. The index is the
+ * handle the DPC compares: word [voice + 0xA + 2 * byte [voice + 0x64]].
+ *
+ * Clearing only the bit stays the last resort: it left the voice listed in
+ * au22/au23 (a self-linked hardware list, then a call on a freed voice). */
+#define DSWAIT_MS 20
+__declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
+__declspec(dllimport) int __stdcall SwitchToThread(void);
 void sub_001C1478(void)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
     uint32_t self = g_ecx;
     uint16_t *flags = (uint16_t *)(mem + self + 0x12);
-    static unsigned forced;
-    int i, unlinked = 0;
+    static unsigned waited, guarded, cleared;
+    const char *how = NULL;
+    int i;
 
     if (*flags & 1) {
-        for (i = 0; i < 1000 && (*flags & 0x8000); i++) {
+        unsigned long long t0 = GetTickCount64();
+        for (i = 0; *flags & 0x8000; i++) {
             g_ecx = self;
             g_esp -= 4;
             *(uint32_t *)(mem + g_esp) = 0x001C148Au;   /* return address the call pushes */
             sub_001C0BAE();
+            if (!(*flags & 0x8000))
+                break;
+            if (i >= 1000 && GetTickCount64() - t0 >= DSWAIT_MS)
+                break;
+            if (i >= 1000)
+                SwitchToThread();
+        }
+        if (i >= 1000 && !(*flags & 0x8000)) {
+            how = "completed by the title after a wait";
+            waited++;
         }
         if (*flags & 0x8000) {
-            uint32_t node = self + 0x4C;
-            if (*(uint32_t *)(mem + node) != node) {
-                g_ecx = self;
+            uint32_t owner = *(uint32_t *)(mem + self + 8);
+            uint32_t idx = *(uint16_t *)(mem + self + 0xA + 2u * mem[self + 0x64]);
+            if (owner && idx < 0x100 &&
+                    *(uint32_t *)(mem + owner + 0x330 + idx * 4) == self) {
+                g_ecx = owner;
                 g_esp -= 8;
-                *(uint32_t *)(mem + g_esp + 4) = 1;          /* arg: stopped */
-                *(uint32_t *)(mem + g_esp) = 0x001BF852u;    /* the DPC path's return address */
-                sub_001C08EC();                              /* pops both (ret 4) */
-                unlinked = 1;
+                *(uint32_t *)(mem + g_esp + 4) = idx;        /* arg: voice index */
+                *(uint32_t *)(mem + g_esp) = 0x001BFC6Eu;    /* the DPC path's return address */
+                sub_001BF7FE();                              /* pops both (ret 4) */
             }
-            if (*flags & 0x8000)
+            if (!(*flags & 0x8000)) {
+                how = "completed through sub_001BF7FE";
+                guarded++;
+            } else {
                 *flags &= (uint16_t)~0x8000;
-            if (forced++ < 10)
-                fprintf(stderr, "[DSWAIT] forced voice-stop completion on %08X (%s)\n", self,
-                        unlinked ? "unlinked" : "not on a list");
+                how = "bit cleared (guards refused)";
+                cleared++;
+            }
         }
+        if (how && waited + guarded + cleared <= 20)
+            fprintf(stderr, "[DSWAIT] voice %08X: %s (waited %u, guarded %u, cleared %u)\n",
+                    self, how, waited, guarded, cleared);
     }
     g_ecx = self;
     g_esp += 4;                                          /* ret */

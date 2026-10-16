@@ -56,9 +56,30 @@
 ```
 4. Play:
 ```bash
-   DR_NO_FMV=1 ./play.sh run1
+   ./play.sh run1
 ```
-   Keyboard: Enter = Start, Z = A, X = B, arrow keys to move.
+   Keyboard: Enter = Start, Z = A, X = B, arrow keys to move. The intro movies play in a window of their own. `DR_NO_FMV=1` skips that window, but the game can then stall at a black screen after the intro, so leave it off for play.
+
+### Gamepad
+
+Any XInput controller (Xbox 360 / One / Series, or another pad through Steam Input or DS4Windows) plays as player 1. It can be plugged in or swapped while the game runs.
+
+| PC pad | Xbox | | PC pad | Xbox |
+|---|---|---|---|---|
+| A B X Y | A B X Y | | LT / RT | Left / right trigger |
+| LB | White | | Left stick | Left stick |
+| RB | Black | | Right stick | Right stick |
+| Start / Back | Start / Back | | LS / RS click | Left / right thumb |
+| D-pad | D-pad | | | |
+
+- In Deathrow the right stick strafes, LT is a modifier held with a face button (LT+B slide tackle, LT+A dive), and RT swings the camera to the objective. None of them does much on its own.
+- A B X Y, Black and White are pressure-sensitive on the Xbox; a PC pad sends them fully pressed.
+- The sticks go through as read; the game applies its own dead zone. If a stick drifts, add one on the PC side with `RECOMP_PAD_DEADZONE=<0-32000>` (for example `4000`).
+- The keyboard (`RECOMP_KEYBOARD=1`, on in `play.sh`) works alongside the pad on player 1.
+- The n-th connected XInput pad is the n-th player, whichever XInput slot Windows gave it. Only one Xbox pad is plugged in by default (`RECOMP_USB_PADS=1`).
+- `play.sh` plugs the pad into the port the Xbox calls player 1 (`RECOMP_USB_NDP=4 RECOMP_USB_PORT=2`). The toolkit's default, USB root port 1, is controller port 3: buttons and the left stick still work there, but code that reads only player 1's slot ignores it.
+- No rumble yet.
+- Each change of buttons or stick direction shows up in the run log as an `[INPUT] port N -> game:` line.
 
 ## Repository layout
 

@@ -264,6 +264,183 @@ index 128d86f..96a9342 100644
              d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                 NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
  
+diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
+index 5975014..82c11eb 100644
+--- a/src/input/xinput_device.c
++++ b/src/input/xinput_device.c
+@@ -13,6 +13,8 @@
+ #include "xinput_xbox.h"
+ #include "keyboard.h"
+ #include "mkb_input.h"
++#include <math.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -62,13 +64,93 @@ static DWORD g_last_packet[XBOX_MAX_CONTROLLERS] = { 0 };
+ /* The keyboard on port 0 (RECOMP_KEYBOARD=1) comes from keyboard.c, shared
+  * with the SDL backend; the GDI window in fb_present.c records the keys. */
+ 
+-void xbox_InputInit(void)
++/* Host pad -> Xbox pad, Windows XInput:
++ *
++ *   XInput             Xbox
++ *   A B X Y            A B X Y          analog bytes, 0 or 255 (XInput's
++ *                                       face buttons are digital)
++ *   LB / RB            White / Black    xemu's layout, and the keyboard's
++ *                                       (Q / E)
++ *   LT / RT            L / R trigger    0..255 as read
++ *   D-pad, Start, Back, LS / RS click   the same bits on both
++ *   Left / right stick                  as read: both put +Y up, so no flip;
++ *                                       dead zone RECOMP_PAD_DEADZONE
++ *
++ * Xbox port n is the n-th connected XInput pad rather than XInput slot n, so
++ * a pad Windows put in slot 1 (a second receiver, a virtual pad that took
++ * slot 0) still drives player 1. */
++
++/* XInputGetState on an empty slot is slow -- it goes looking for a device --
++ * and the title polls every frame, through both the USB pad model and the
++ * XInputGetState bridge. So an empty slot is asked again at most once a
++ * second, which is also how a pad plugged in mid-game gets found. */
++#define XI_PROBE_MS 1000
++
++static BOOL  s_slot_live[XUSER_MAX_COUNT];
++static DWORD s_slot_probe[XUSER_MAX_COUNT];
++
++static BOOL slot_read(DWORD slot, XINPUT_STATE *st)
++{
++    DWORD now = GetTickCount();
++    BOOL live;
++
++    if (!s_slot_live[slot] && s_slot_probe[slot]
++        && now - s_slot_probe[slot] < XI_PROBE_MS)
++        return FALSE;
++    s_slot_probe[slot] = now ? now : 1;
++    live = XInputGetState(slot, st) == ERROR_SUCCESS;
++    if (live != s_slot_live[slot]) {
++        s_slot_live[slot] = live;
++        fprintf(stderr, "[INPUT] XInput slot %lu: pad %s\n",
++                (unsigned long)slot, live ? "connected" : "disconnected");
++        fflush(stderr);
++    }
++    return live;
++}
++
++/* The XInput slot of Xbox port dwPort (the dwPort-th live one) and its
++ * state, or -1. */
++static int host_pad(DWORD dwPort, XINPUT_STATE *st)
++{
++    DWORD slot, n = 0;
++
++    for (slot = 0; slot < XUSER_MAX_COUNT; slot++)
++        if (slot_read(slot, st) && n++ == dwPort)
++            return (int)slot;
++    return -1;
++}
++
++/* Radial dead zone, RECOMP_PAD_DEADZONE=0..32000. The default is none: an
++ * Xbox title applies its own, sized for the original pad's far sloppier
++ * sticks. Past the zone the throw is rescaled so the rim still reads full. */
++static void dead_zone(SHORT *x, SHORT *y)
+ {
+-    for (DWORD i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
+-        XINPUT_STATE state;
+-        DWORD result = XInputGetState(i, &state);
+-        g_controller_connected[i] = (result == ERROR_SUCCESS);
++    static int dz = -1;
++    double fx = *x, fy = *y, m, s;
++
++    if (dz < 0) {
++        const char *v = getenv("RECOMP_PAD_DEADZONE");
++        dz = v ? atoi(v) : 0;
++        if (dz < 0 || dz > 32000) dz = 0;
++    }
++    if (!dz)
++        return;
++    m = sqrt(fx * fx + fy * fy);
++    if (m <= dz) {
++        *x = *y = 0;
++        return;
+     }
++    s = ((m > 32767.0 ? 32767.0 : m) - dz) / (32767.0 - dz) * 32767.0 / m;
++    fx *= s; fy *= s;
++    *x = (SHORT)(fx > 32767.0 ? 32767 : fx < -32768.0 ? -32768 : fx);
++    *y = (SHORT)(fy > 32767.0 ? 32767 : fy < -32768.0 ? -32768 : fy);
++}
++
++void xbox_InputInit(void)
++{
++    XINPUT_STATE state;
++    for (DWORD i = 0; i < XBOX_MAX_CONTROLLERS; i++)
++        g_controller_connected[i] = host_pad(i, &state) >= 0;
+ }
+ 
+ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+@@ -79,7 +161,8 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+     if (dwPort >= XBOX_MAX_CONTROLLERS || !pState)
+         return ERROR_DEVICE_NOT_CONNECTED;
+ 
+-    result = XInputGetState(dwPort, &xi_state);
++    result = host_pad(dwPort, &xi_state) >= 0 ? ERROR_SUCCESS
++                                              : ERROR_DEVICE_NOT_CONNECTED;
+     if (result != ERROR_SUCCESS) {
+         g_controller_connected[dwPort] = FALSE;
+         if (dwPort == 0) {
+@@ -111,9 +194,9 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+         (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_X) ? 255 : 0;
+     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] =
+         (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_Y) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] =
+-        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) ? 255 : 0;
+     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] =
++        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] =
+         (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 255 : 0;
+     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] = xi_state.Gamepad.bLeftTrigger;
+     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] = xi_state.Gamepad.bRightTrigger;
+@@ -122,6 +205,8 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+     pState->Gamepad.sThumbLY = xi_state.Gamepad.sThumbLY;
+     pState->Gamepad.sThumbRX = xi_state.Gamepad.sThumbRX;
+     pState->Gamepad.sThumbRY = xi_state.Gamepad.sThumbRY;
++    dead_zone(&pState->Gamepad.sThumbLX, &pState->Gamepad.sThumbLY);
++    dead_zone(&pState->Gamepad.sThumbRX, &pState->Gamepad.sThumbRY);
+ 
+     if (dwPort == 0)
+         keyboard_merge(pState);
+@@ -137,13 +222,17 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
+ {
+     XINPUT_VIBRATION xi_vib;
++    XINPUT_STATE st;
++    int slot;
+ 
+     if (dwPort >= XBOX_MAX_CONTROLLERS || !pVibration)
+         return ERROR_DEVICE_NOT_CONNECTED;
++    if ((slot = host_pad(dwPort, &st)) < 0)
++        return ERROR_DEVICE_NOT_CONNECTED;
+ 
+     xi_vib.wLeftMotorSpeed = pVibration->wLeftMotorSpeed;
+     xi_vib.wRightMotorSpeed = pVibration->wRightMotorSpeed;
+-    return XInputSetState(dwPort, &xi_vib);
++    return XInputSetState((DWORD)slot, &xi_vib);
+ }
+ 
+ BOOL xbox_InputIsConnected(DWORD dwPort)
+@@ -160,7 +249,13 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
+     if (dwPort >= XBOX_MAX_CONTROLLERS || !pCaps)
+         return ERROR_DEVICE_NOT_CONNECTED;
+ 
+-    result = XInputGetCapabilities(dwPort, dwFlags, &xi_caps);
++    {
++        XINPUT_STATE st;
++        int slot = host_pad(dwPort, &st);
++        if (slot < 0)
++            return ERROR_DEVICE_NOT_CONNECTED;
++        result = XInputGetCapabilities((DWORD)slot, dwFlags, &xi_caps);
++    }
+     if (result != ERROR_SUCCESS) return result;
+ 
+     memset(pCaps, 0, sizeof(XBOX_INPUT_CAPABILITIES));
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
 index 965dd08..23777e7 100644
 --- a/src/kernel/kernel_bridge.c
