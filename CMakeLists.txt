@@ -120,3 +120,7 @@ endif()
 # sampling profiler (off unless RECOMP_PROF=1)
 target_sources(deathrow_recomp PRIVATE src/prof_sampler.c)
 target_link_options(deathrow_recomp PRIVATE /MAP)
+
+# The window's title prefix and its settings file (exonerated.ini), see
+# xboxrecomp/src/video/fb_present.c.
+target_compile_definitions(xbox_video PRIVATE RECOMP_APP_NAME="Exonerated")

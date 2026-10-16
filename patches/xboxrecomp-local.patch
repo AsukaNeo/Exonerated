@@ -3878,3 +3878,776 @@ index 18291d7..f447290 100644
  /* The address the host assigned pad `pad` with SET_ADDRESS, 0 until it does,
   * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index b26edfe..8c591bc 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -7,20 +7,52 @@
+  * implemented, none of it is observable. This is the other half: a window that
+  * reads that memory and puts it on screen.
+  *
+- * Deliberately plain GDI rather than the D3D8 layer. The point is to display
+- * whatever the guest actually wrote, so the fewer stages between guest memory
+- * and the screen the better -- and it must keep working while the D3D8 layer
+- * is busy with something else, such as the FMV player's own window.
++ * Not through the D3D8 layer. The point is to display whatever the guest
++ * actually wrote, so the fewer stages between guest memory and the screen the
++ * better -- and it must keep working while the D3D8 layer is busy with
++ * something else, such as the FMV player's own window. The finished frame is
++ * shown with a D3D11 flip-model swapchain of this window's own (vsync, scaled
++ * with a choice of filter), or with plain GDI where that cannot be had.
++ *
++ * Settings, each an environment variable or a key in the [display] section
++ * of <app>.ini (the variable wins). The ini is looked for at RECOMP_INI, then
++ * in the working directory, then beside the exe; <app> is RECOMP_APP_NAME,
++ * lowercased, which a project sets at compile time (default "recomp").
++ *
++ *   RECOMP_VSYNC         vsync         1 (default) or 0
++ *   RECOMP_FILTER        filter        sharp (default), bilinear, nearest
++ *   RECOMP_SCALE         scale         fit (default, 4:3 letterboxed),
++ *                                      integer, stretch
++ *   RECOMP_FULLSCREEN    fullscreen    0 (default) or 1: start borderless
++ *   RECOMP_WINDOW_SCALE  window_scale  initial window size, x the frame (2)
++ *   RECOMP_PRESENT       present       d3d11 (default) or gdi
++ *   RECOMP_WINDOW_TITLE  title         title bar prefix (RECOMP_APP_NAME)
++ *
++ * Keys: Alt+Enter or F11 toggles borderless fullscreen; F12 saves the frame
++ * to screenshots/<app>_<date>_<time>.bmp in the working directory.
+  *
+  * Off unless RECOMP_FB_WINDOW is set.
+  */
+ #include <stdint.h>
+ 
+ #if defined(_WIN32)
++#define COBJMACROS
+ #include <windows.h>
++#include <d3d11.h>
++#include <dxgi1_5.h>
++#include <d3dcompiler.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <ctype.h>
++#pragma comment(lib, "d3d11.lib")
++#pragma comment(lib, "dxgi.lib")
++#pragma comment(lib, "dxguid.lib")
++#pragma comment(lib, "d3dcompiler.lib")
++
++#ifndef RECOMP_APP_NAME
++#define RECOMP_APP_NAME "Recomp"
++#endif
+ /* Which keys are down, for the pad stand-in in src/input: this window
+  * records them in the shared key table (src/input/keyboard.c).
+  *
+@@ -145,6 +177,171 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+     InterlockedExchange(&s_frame_draws, (LONG)draws);
+ }
+ 
++/* ---- settings ----------------------------------------------------------- */
++
++enum { FILTER_NEAREST, FILTER_BILINEAR, FILTER_SHARP };
++enum { SCALE_FIT, SCALE_INTEGER, SCALE_STRETCH };
++
++static struct {
++    int  vsync, filter, scale, fullscreen, window_scale, gdi;
++    char title[64];
++    char app[32];          /* RECOMP_APP_NAME, lowercased: ini and file names */
++} s_cfg;
++
++static char s_ini[MAX_PATH];
++
++/* A short message shown in the title bar for a few seconds, so a key like
++ * F12 says that it did something. Window thread only. */
++static char  s_notice[128];
++static DWORD s_notice_until;
++
++/* One setting: the environment variable if set, else the ini key, else
++ * the default. */
++static void cfg_str(const char *env, const char *key, const char *def,
++                    char *out, DWORD n)
++{
++    const char *v = getenv(env);
++    if (v && *v) {
++        snprintf(out, n, "%s", v);
++        return;
++    }
++    if (s_ini[0])
++        GetPrivateProfileStringA("display", key, def, out, n, s_ini);
++    else
++        snprintf(out, n, "%s", def);
++}
++
++static int cfg_int(const char *env, const char *key, int def)
++{
++    char buf[32], dflt[16];
++    snprintf(dflt, sizeof dflt, "%d", def);
++    cfg_str(env, key, dflt, buf, sizeof buf);
++    return atoi(buf);
++}
++
++static int file_exists(const char *p)
++{
++    DWORD a = GetFileAttributesA(p);
++    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
++}
++
++static void cfg_load(void)
++{
++    char buf[32], exe[MAX_PATH], *slash;
++    const char *v = getenv("RECOMP_INI");
++    size_t i;
++
++    snprintf(s_cfg.app, sizeof s_cfg.app, "%s", RECOMP_APP_NAME);
++    for (i = 0; s_cfg.app[i]; i++)
++        s_cfg.app[i] = (char)tolower((unsigned char)s_cfg.app[i]);
++
++    /* RECOMP_INI, then the working directory (where play.sh runs), then
++     * beside the exe. */
++    s_ini[0] = 0;
++    if (v && *v) {
++        snprintf(s_ini, sizeof s_ini, "%s", v);
++    } else {
++        char cwd[MAX_PATH];
++        if (GetCurrentDirectoryA(sizeof cwd, cwd)) {
++            snprintf(s_ini, sizeof s_ini, "%s\\%s.ini", cwd, s_cfg.app);
++            if (!file_exists(s_ini))
++                s_ini[0] = 0;
++        }
++        if (!s_ini[0] && GetModuleFileNameA(NULL, exe, sizeof exe)) {
++            slash = strrchr(exe, '\\');
++            if (slash) {
++                *slash = 0;
++                snprintf(s_ini, sizeof s_ini, "%s\\%s.ini", exe, s_cfg.app);
++                if (!file_exists(s_ini))
++                    s_ini[0] = 0;
++            }
++        }
++    }
++
++    s_cfg.vsync = cfg_int("RECOMP_VSYNC", "vsync", 1) != 0;
++    s_cfg.fullscreen = cfg_int("RECOMP_FULLSCREEN", "fullscreen", 0) != 0;
++    s_cfg.window_scale = cfg_int("RECOMP_WINDOW_SCALE", "window_scale", 2);
++    if (s_cfg.window_scale < 1 || s_cfg.window_scale > 8)
++        s_cfg.window_scale = 2;
++
++    cfg_str("RECOMP_FILTER", "filter", "sharp", buf, sizeof buf);
++    s_cfg.filter = !_stricmp(buf, "nearest")  ? FILTER_NEAREST
++                 : !_stricmp(buf, "bilinear") ? FILTER_BILINEAR : FILTER_SHARP;
++    cfg_str("RECOMP_SCALE", "scale", "fit", buf, sizeof buf);
++    s_cfg.scale = !_stricmp(buf, "integer") ? SCALE_INTEGER
++                : !_stricmp(buf, "stretch") ? SCALE_STRETCH : SCALE_FIT;
++    cfg_str("RECOMP_PRESENT", "present", "d3d11", buf, sizeof buf);
++    s_cfg.gdi = !_stricmp(buf, "gdi");
++    cfg_str("RECOMP_WINDOW_TITLE", "title", RECOMP_APP_NAME,
++            s_cfg.title, sizeof s_cfg.title);
++
++    fprintf(stderr, "  [FBWIN] settings%s%s: vsync %d filter %s scale %s "
++            "fullscreen %d window x%d present %s\n",
++            s_ini[0] ? " from " : " (no ini)", s_ini, s_cfg.vsync,
++            s_cfg.filter == FILTER_NEAREST ? "nearest"
++            : s_cfg.filter == FILTER_BILINEAR ? "bilinear" : "sharp",
++            s_cfg.scale == SCALE_INTEGER ? "integer"
++            : s_cfg.scale == SCALE_STRETCH ? "stretch" : "fit",
++            s_cfg.fullscreen, s_cfg.window_scale, s_cfg.gdi ? "gdi" : "d3d11");
++}
++
++/* Where the frame goes in a cw x ch client area. */
++static void fit_rect(int cw, int ch, int *x, int *y, int *w, int *h)
++{
++    int sw = (int)s_fb_width, sh = (int)s_fb_height, k;
++
++    if (cw < 1) cw = 1;
++    if (ch < 1) ch = 1;
++    *w = cw; *h = ch;
++    if (s_cfg.scale == SCALE_INTEGER
++        && (k = (cw / sw < ch / sh ? cw / sw : ch / sh)) >= 1) {
++        *w = sw * k; *h = sh * k;
++    } else if (s_cfg.scale != SCALE_STRETCH) {
++        if ((long long)cw * sh > (long long)ch * sw)
++            *w = (int)((long long)ch * sw / sh);     /* pillarbox */
++        else
++            *h = (int)((long long)cw * sh / sw);     /* letterbox */
++    }
++    *x = (cw - *w) / 2;
++    *y = (ch - *h) / 2;
++}
++
++/* ---- window ------------------------------------------------------------- */
++
++static volatile LONG s_resized;       /* the client area changed size */
++static volatile LONG s_want_fullscreen_toggle, s_want_screenshot;
++static int           s_is_fullscreen;
++
++/* Borderless fullscreen on the window's monitor, and back to the window it
++ * was. Not exclusive fullscreen: Alt+Tab and a second monitor keep working,
++ * and a flip-model swapchain covering the monitor is just as fast. */
++static void toggle_fullscreen(HWND h)
++{
++    static WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
++
++    if (!s_is_fullscreen) {
++        MONITORINFO mi = { sizeof(MONITORINFO) };
++        if (!GetWindowPlacement(h, &wp)
++            || !GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY),
++                                &mi))
++            return;
++        SetWindowLongPtrA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
++        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
++                     mi.rcMonitor.right - mi.rcMonitor.left,
++                     mi.rcMonitor.bottom - mi.rcMonitor.top,
++                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        s_is_fullscreen = 1;
++    } else {
++        SetWindowLongPtrA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
++        SetWindowPlacement(h, &wp);
++        SetWindowPos(h, NULL, 0, 0, 0, 0,
++                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
++                     | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        s_is_fullscreen = 0;
++    }
++    InterlockedExchange(&s_resized, 1);
++}
++
+ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+ {
+     switch (m) {
+@@ -153,8 +350,28 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+         InterlockedExchange(&s_fb_running, 0);
+         return 0;
+ 
++    case WM_SIZE:
++        InterlockedExchange(&s_resized, 1);
++        return 0;
++
++    case WM_ERASEBKGND:
++        return 1;                       /* every pixel is drawn each frame */
++
+     case WM_KEYDOWN:
+     case WM_SYSKEYDOWN:
++        /* The window's own keys, kept from the game: Alt+Enter would also
++         * be Start. Key repeat is ignored so a held key toggles once. */
++        if ((w == VK_RETURN && m == WM_SYSKEYDOWN && (l & (1 << 29)))
++            || w == VK_F11) {
++            if (!(l & (1 << 30)))
++                InterlockedExchange(&s_want_fullscreen_toggle, 1);
++            return 0;
++        }
++        if (w == VK_F12) {
++            if (!(l & (1 << 30)))
++                InterlockedExchange(&s_want_screenshot, 1);
++            return 0;
++        }
+         xbox_InputKeySet((int)w, 1);
+         /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
+          *
+@@ -268,15 +485,328 @@ int xbox_FramebufferDumpBmp(const char *path)
+     return 0;
+ }
+ 
++/* ---- D3D11 presenter ---------------------------------------------------- */
++
++/* One full-screen triangle sampling the frame. Sharp bilinear is nearest
++ * neighbour to the largest whole multiple that fits, then bilinear for the
++ * remainder: pixels stay square-edged at any window size without the uneven
++ * columns plain nearest gives at a fractional scale. Alpha is forced to 1,
++ * since an X8R8G8B8 front buffer's top byte is whatever the title left. */
++static const char s_hlsl[] =
++    "Texture2D t : register(t0);\n"
++    "SamplerState sp : register(s0);\n"
++    "SamplerState sl : register(s1);\n"
++    "cbuffer C : register(b0) { float2 src; float2 scale; int mode; int3 pad; };\n"
++    "struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
++    "V vs(uint id : SV_VertexID) {\n"
++    "    V o; float2 p = float2((id << 1) & 2, id & 2);\n"
++    "    o.uv = p; o.pos = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
++    "    return o;\n"
++    "}\n"
++    "float4 ps(V i) : SV_Target {\n"
++    "    float3 c;\n"
++    "    if (mode == 0) c = t.Sample(sp, i.uv).rgb;\n"
++    "    else if (mode == 1) c = t.Sample(sl, i.uv).rgb;\n"
++    "    else {\n"
++    "        float2 texel = i.uv * src;\n"
++    "        float2 k = max(floor(scale), 1.0);\n"
++    "        float2 range = 0.5 - 0.5 / k;\n"
++    "        float2 d = frac(texel) - 0.5;\n"
++    "        float2 f = (d - clamp(d, -range, range)) * k + 0.5;\n"
++    "        c = t.Sample(sl, (floor(texel) + f) / src).rgb;\n"
++    "    }\n"
++    "    return float4(c, 1);\n"
++    "}\n";
++
++typedef struct { float src[2], scale[2]; int mode, pad[3]; } FbConsts;
++
++static struct {
++    ID3D11Device            *dev;
++    ID3D11DeviceContext     *ctx;
++    IDXGISwapChain1         *sc;
++    ID3D11RenderTargetView  *rtv;
++    ID3D11Texture2D         *tex;
++    ID3D11ShaderResourceView *srv;
++    ID3D11VertexShader      *vs;
++    ID3D11PixelShader       *ps;
++    ID3D11SamplerState      *smp[2];
++    ID3D11Buffer            *cb;
++    UINT                     sc_flags;
++    int                      tearing;
++} d3d;
++
++#define SAFE_RELEASE(p) do { if (p) { IUnknown_Release((IUnknown *)(p)); (p) = NULL; } } while (0)
++
++static void d3d_release(void)
++{
++    if (d3d.ctx)
++        ID3D11DeviceContext_ClearState(d3d.ctx);
++    SAFE_RELEASE(d3d.rtv); SAFE_RELEASE(d3d.srv); SAFE_RELEASE(d3d.tex);
++    SAFE_RELEASE(d3d.vs);  SAFE_RELEASE(d3d.ps);  SAFE_RELEASE(d3d.cb);
++    SAFE_RELEASE(d3d.smp[0]); SAFE_RELEASE(d3d.smp[1]);
++    SAFE_RELEASE(d3d.sc);  SAFE_RELEASE(d3d.ctx); SAFE_RELEASE(d3d.dev);
++}
++
++static int d3d_make_rtv(void)
++{
++    ID3D11Texture2D *bb = NULL;
++    HRESULT hr = IDXGISwapChain1_GetBuffer(d3d.sc, 0, &IID_ID3D11Texture2D,
++                                           (void **)&bb);
++    if (FAILED(hr))
++        return 0;
++    hr = ID3D11Device_CreateRenderTargetView(d3d.dev, (ID3D11Resource *)bb,
++                                             NULL, &d3d.rtv);
++    ID3D11Texture2D_Release(bb);
++    return SUCCEEDED(hr);
++}
++
++static ID3DBlob *d3d_compile(const char *entry, const char *target)
++{
++    ID3DBlob *code = NULL, *err = NULL;
++    HRESULT hr = D3DCompile(s_hlsl, sizeof s_hlsl - 1, "fb_present", NULL,
++                            NULL, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3,
++                            0, &code, &err);
++    if (FAILED(hr)) {
++        fprintf(stderr, "  [FBWIN] shader %s: %s\n", entry,
++                err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "failed");
++        SAFE_RELEASE(code);
++    }
++    SAFE_RELEASE(err);
++    return code;
++}
++
++static int d3d_init(HWND hwnd)
++{
++    static const D3D_DRIVER_TYPE types[2] = { D3D_DRIVER_TYPE_HARDWARE,
++                                              D3D_DRIVER_TYPE_WARP };
++    static const DXGI_SWAP_EFFECT effects[2] = { DXGI_SWAP_EFFECT_FLIP_DISCARD,
++                                                 DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL };
++    IDXGIDevice *xdev = NULL;
++    IDXGIAdapter *adapter = NULL;
++    IDXGIFactory2 *fac = NULL;
++    IDXGIFactory5 *fac5 = NULL;
++    DXGI_SWAP_CHAIN_DESC1 sd;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_SAMPLER_DESC smd;
++    D3D11_BUFFER_DESC bd;
++    ID3DBlob *vsb = NULL, *psb = NULL;
++    HRESULT hr = E_FAIL;
++    int i, ok = 0;
++
++    memset(&d3d, 0, sizeof d3d);
++    for (i = 0; i < 2 && FAILED(hr); i++)
++        hr = D3D11CreateDevice(NULL, types[i], NULL,
++                               D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
++                               D3D11_SDK_VERSION, &d3d.dev, NULL, &d3d.ctx);
++    if (FAILED(hr))
++        goto out;
++    if (FAILED(ID3D11Device_QueryInterface(d3d.dev, &IID_IDXGIDevice, (void **)&xdev))
++        || FAILED(IDXGIDevice_GetAdapter(xdev, &adapter))
++        || FAILED(IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, (void **)&fac)))
++        goto out;
++
++    /* Tearing lets vsync off really be off in a borderless window. */
++    if (SUCCEEDED(IDXGIFactory2_QueryInterface(fac, &IID_IDXGIFactory5, (void **)&fac5))) {
++        BOOL allow = FALSE;
++        if (SUCCEEDED(IDXGIFactory5_CheckFeatureSupport(fac5,
++                DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof allow)))
++            d3d.tearing = allow != FALSE;
++        IDXGIFactory5_Release(fac5);
++    }
++    d3d.sc_flags = d3d.tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
++
++    memset(&sd, 0, sizeof sd);
++    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    sd.SampleDesc.Count = 1;
++    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    sd.BufferCount = 2;
++    sd.Flags = d3d.sc_flags;
++    hr = E_FAIL;
++    for (i = 0; i < 2 && FAILED(hr); i++) {      /* FLIP_DISCARD is Win10+ */
++        sd.SwapEffect = effects[i];
++        hr = IDXGIFactory2_CreateSwapChainForHwnd(fac, (IUnknown *)d3d.dev, hwnd,
++                                                  &sd, NULL, NULL, &d3d.sc);
++    }
++    if (FAILED(hr))
++        goto out;
++    /* Alt+Enter is ours: borderless, not DXGI's exclusive mode. */
++    IDXGIFactory2_MakeWindowAssociation(fac, hwnd, DXGI_MWA_NO_ALT_ENTER);
++    if (!d3d_make_rtv())
++        goto out;
++
++    memset(&td, 0, sizeof td);
++    td.Width = s_fb_width;
++    td.Height = s_fb_height;
++    td.MipLevels = 1;
++    td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;      /* s_rgb is 0x00RRGGBB */
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_DYNAMIC;
++    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++    td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++    if (FAILED(ID3D11Device_CreateTexture2D(d3d.dev, &td, NULL, &d3d.tex))
++        || FAILED(ID3D11Device_CreateShaderResourceView(d3d.dev,
++                      (ID3D11Resource *)d3d.tex, NULL, &d3d.srv)))
++        goto out;
++
++    vsb = d3d_compile("vs", "vs_4_0");
++    psb = d3d_compile("ps", "ps_4_0");
++    if (!vsb || !psb
++        || FAILED(ID3D11Device_CreateVertexShader(d3d.dev,
++                      ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb),
++                      NULL, &d3d.vs))
++        || FAILED(ID3D11Device_CreatePixelShader(d3d.dev,
++                      ID3D10Blob_GetBufferPointer(psb), ID3D10Blob_GetBufferSize(psb),
++                      NULL, &d3d.ps)))
++        goto out;
++
++    memset(&smd, 0, sizeof smd);
++    smd.AddressU = smd.AddressV = smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    smd.MaxLOD = D3D11_FLOAT32_MAX;
++    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
++    if (FAILED(ID3D11Device_CreateSamplerState(d3d.dev, &smd, &d3d.smp[0])))
++        goto out;
++    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    if (FAILED(ID3D11Device_CreateSamplerState(d3d.dev, &smd, &d3d.smp[1])))
++        goto out;
++
++    memset(&bd, 0, sizeof bd);
++    bd.ByteWidth = sizeof(FbConsts);
++    bd.Usage = D3D11_USAGE_DEFAULT;
++    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++    if (FAILED(ID3D11Device_CreateBuffer(d3d.dev, &bd, NULL, &d3d.cb)))
++        goto out;
++    ok = 1;
++
++out:
++    SAFE_RELEASE(vsb); SAFE_RELEASE(psb);
++    SAFE_RELEASE(fac); SAFE_RELEASE(adapter); SAFE_RELEASE(xdev);
++    if (!ok)
++        d3d_release();
++    return ok;
++}
++
++static void d3d_resize(void)
++{
++    SAFE_RELEASE(d3d.rtv);
++    ID3D11DeviceContext_OMSetRenderTargets(d3d.ctx, 0, NULL, NULL);
++    IDXGISwapChain1_ResizeBuffers(d3d.sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN,
++                                  d3d.sc_flags);
++    d3d_make_rtv();
++}
++
++/* Upload s_rgb and draw it letterboxed. Returns the Present result. */
++static HRESULT d3d_present(HWND hwnd)
++{
++    static const float black[4] = { 0, 0, 0, 1 };
++    D3D11_MAPPED_SUBRESOURCE map;
++    D3D11_VIEWPORT vp;
++    FbConsts c;
++    RECT cr;
++    int x, y, w, h;
++    uint32_t row;
++
++    if (!d3d.rtv)
++        return E_FAIL;
++    if (SUCCEEDED(ID3D11DeviceContext_Map(d3d.ctx, (ID3D11Resource *)d3d.tex, 0,
++                                          D3D11_MAP_WRITE_DISCARD, 0, &map))) {
++        for (row = 0; row < s_fb_height; row++)
++            memcpy((uint8_t *)map.pData + (size_t)row * map.RowPitch,
++                   s_rgb + (size_t)row * s_fb_width, (size_t)s_fb_width * 4);
++        ID3D11DeviceContext_Unmap(d3d.ctx, (ID3D11Resource *)d3d.tex, 0);
++    }
++
++    GetClientRect(hwnd, &cr);
++    fit_rect(cr.right, cr.bottom, &x, &y, &w, &h);
++    memset(&vp, 0, sizeof vp);
++    vp.TopLeftX = (float)x; vp.TopLeftY = (float)y;
++    vp.Width = (float)w;    vp.Height = (float)h;
++    vp.MaxDepth = 1.0f;
++
++    c.src[0] = (float)s_fb_width;  c.src[1] = (float)s_fb_height;
++    c.scale[0] = (float)w / (float)s_fb_width;
++    c.scale[1] = (float)h / (float)s_fb_height;
++    c.mode = s_cfg.filter;
++    c.pad[0] = c.pad[1] = c.pad[2] = 0;
++    ID3D11DeviceContext_UpdateSubresource(d3d.ctx, (ID3D11Resource *)d3d.cb, 0,
++                                          NULL, &c, 0, 0);
++
++    ID3D11DeviceContext_OMSetRenderTargets(d3d.ctx, 1, &d3d.rtv, NULL);
++    ID3D11DeviceContext_ClearRenderTargetView(d3d.ctx, d3d.rtv, black);
++    ID3D11DeviceContext_RSSetViewports(d3d.ctx, 1, &vp);
++    ID3D11DeviceContext_IASetPrimitiveTopology(d3d.ctx,
++                                               D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    ID3D11DeviceContext_IASetInputLayout(d3d.ctx, NULL);
++    ID3D11DeviceContext_VSSetShader(d3d.ctx, d3d.vs, NULL, 0);
++    ID3D11DeviceContext_PSSetShader(d3d.ctx, d3d.ps, NULL, 0);
++    ID3D11DeviceContext_PSSetShaderResources(d3d.ctx, 0, 1, &d3d.srv);
++    ID3D11DeviceContext_PSSetSamplers(d3d.ctx, 0, 2, d3d.smp);
++    ID3D11DeviceContext_PSSetConstantBuffers(d3d.ctx, 0, 1, &d3d.cb);
++    ID3D11DeviceContext_Draw(d3d.ctx, 3, 0);
++
++    return IDXGISwapChain1_Present(d3d.sc, s_cfg.vsync ? 1 : 0,
++                                   (!s_cfg.vsync && d3d.tearing)
++                                       ? DXGI_PRESENT_ALLOW_TEARING : 0);
++}
++
++/* ---- GDI fallback ------------------------------------------------------- */
++
++static void gdi_present(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
++{
++    RECT cr, bar;
++    int x, y, w, h;
++    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
++
++    GetClientRect(hwnd, &cr);
++    fit_rect(cr.right, cr.bottom, &x, &y, &w, &h);
++    /* The bars around the picture, not the picture: no flicker. */
++    SetRect(&bar, 0, 0, cr.right, y);               FillRect(hdc, &bar, black);
++    SetRect(&bar, 0, y + h, cr.right, cr.bottom);   FillRect(hdc, &bar, black);
++    SetRect(&bar, 0, y, x, y + h);                  FillRect(hdc, &bar, black);
++    SetRect(&bar, x + w, y, cr.right, y + h);       FillRect(hdc, &bar, black);
++    SetStretchBltMode(hdc, s_cfg.filter == FILTER_NEAREST ? COLORONCOLOR
++                                                         : HALFTONE);
++    SetBrushOrgEx(hdc, 0, 0, NULL);
++    StretchDIBits(hdc, x, y, w, h, 0, 0, (int)s_fb_width, (int)s_fb_height,
++                  s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
++}
++
++/* F12: the frame on screen, at the console's resolution. */
++static void take_screenshot(void)
++{
++    char path[MAX_PATH];
++    SYSTEMTIME t;
++
++    CreateDirectoryA("screenshots", NULL);
++    GetLocalTime(&t);
++    snprintf(path, sizeof path,
++             "screenshots\\%s_%04u%02u%02u_%02u%02u%02u_%03u.bmp", s_cfg.app,
++             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
++             t.wMilliseconds);
++    fprintf(stderr, "  [FBWIN] F12: screenshot\n");
++    if (xbox_FramebufferDumpBmp(path) != 0) {
++        fprintf(stderr, "  [FBWIN] screenshot failed: nothing shown yet\n");
++        snprintf(s_notice, sizeof s_notice, "Screenshot failed");
++    } else {
++        snprintf(s_notice, sizeof s_notice, "Screenshot saved: %s", path);
++    }
++    s_notice_until = GetTickCount() + 3000;
++}
++
+ static DWORD WINAPI fb_thread(LPVOID unused)
+ {
+     HWND hwnd;
+     HDC hdc;
+     BITMAPINFO bi;
+-    RECT r;
++    RECT r, wa;
++    int use_d3d;
++    LONG last_flips = -1;
++    DWORD last_draw = 0;
++    int need_resize = 0;
+ 
+     (void)unused;
+ 
++    cfg_load();
+     {
+         WNDCLASSA wc;
+         memset(&wc, 0, sizeof(wc));
+@@ -286,9 +816,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+         wc.lpszClassName = "XboxRecompFramebuffer";
+         RegisterClassA(&wc);
+     }
+-    r.left = 0; r.top = 0; r.right = (LONG)s_fb_width; r.bottom = (LONG)s_fb_height;
+-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+-    hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
++    /* window_scale times the frame, shrunk by whole steps to fit the work
++     * area so the title bar stays on screen. */
++    {
++        int k = s_cfg.window_scale;
++        SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
++        for (;;) {
++            r.left = 0; r.top = 0;
++            r.right = (LONG)s_fb_width * k; r.bottom = (LONG)s_fb_height * k;
++            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
++            if (k == 1 || (r.right - r.left <= wa.right - wa.left
++                           && r.bottom - r.top <= wa.bottom - wa.top))
++                break;
++            k--;
++        }
++    }
++    hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", s_cfg.title,
+                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                            CW_USEDEFAULT, CW_USEDEFAULT,
+                            r.right - r.left, r.bottom - r.top,
+@@ -309,36 +852,76 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+ 
+     s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
+ 
+-    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
+-            s_fb_width, s_fb_height);
++    use_d3d = !s_cfg.gdi && d3d_init(hwnd);
++    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u, %s%s)\n",
++            s_fb_width, s_fb_height,
++            use_d3d ? "d3d11" : "gdi",
++            use_d3d ? (d3d.tearing ? ", tearing ok" : "") : "");
++    if (s_cfg.fullscreen)
++        toggle_fullscreen(hwnd);
+ 
+     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
+         MSG msg;
++        int have = 0, fresh, resized;
+         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+             TranslateMessage(&msg);
+             DispatchMessageA(&msg);
+         }
++        if (InterlockedExchange(&s_want_fullscreen_toggle, 0))
++            toggle_fullscreen(hwnd);
++
+         if (s_present_idx >= 0 && s_rgb) {
+             /* A finished frame, published by the flip. Copied into s_rgb so
+-             * the dump path and GDI see one consistent image even if the
+-             * next flip lands mid-blit. */
++             * the dump path and the presenter see one consistent image even
++             * if the next flip lands mid-upload. */
+             LONG idx = s_present_idx;
+             if (s_present[idx])
+                 memcpy(s_rgb, s_present[idx],
+                        (size_t)s_fb_width * s_fb_height * 4);
+-            StretchDIBits(hdc, 0, 0, (int)s_fb_width, (int)s_fb_height,
+-                          0, 0, (int)s_fb_width, (int)s_fb_height,
+-                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
++            have = 1;
+         } else if (s_fb_va && s_fb_pitch && s_rgb) {
+             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
+              * before, which is also what a title that never flips needs. */
+             const uint8_t *src =
+                 (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
+             fb_convert(src, s_fb_pitch / s_fb_width);
+-            StretchDIBits(hdc, 0, 0, (int)s_fb_width, (int)s_fb_height,
+-                          0, 0, (int)s_fb_width, (int)s_fb_height,
+-                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
++            have = 1;
+         }
++        if (InterlockedExchange(&s_want_screenshot, 0))
++            take_screenshot();
++
++        /* Draw when there is something new: a flip, a resize, or (before
++         * the first flip) the guest memory read every 16 ms. With vsync the
++         * Present below paces the loop to the display; without it the loop
++         * sleeps between frames rather than spinning. */
++        resized = InterlockedExchange(&s_resized, 0) != 0;
++        need_resize |= resized;          /* kept until the next draw */
++        fresh = s_flips != last_flips || resized
++                || s_present_idx < 0 || GetTickCount() - last_draw >= 100;
++        if (have && fresh) {
++            last_flips = s_flips;
++            last_draw = GetTickCount();
++            if (use_d3d) {
++                HRESULT hr;
++                if (need_resize || !d3d.rtv)
++                    d3d_resize();
++                need_resize = 0;
++                hr = d3d_present(hwnd);
++                if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
++                    fprintf(stderr, "  [FBWIN] d3d11 device lost (0x%08lX): "
++                            "falling back to gdi\n", (unsigned long)hr);
++                    d3d_release();
++                    use_d3d = 0;
++                } else if (hr == DXGI_STATUS_OCCLUDED) {
++                    Sleep(16);                  /* minimised: nothing to pace */
++                }
++            } else {
++                gdi_present(hwnd, hdc, &bi);
++                need_resize = 0;
++            }
++        }
++        if (!use_d3d || !s_cfg.vsync || !(have && fresh))
++            Sleep(use_d3d ? 1 : 4);
+         {
+             /* One dump a few seconds in, so the title has had time to render
+              * something rather than catching the first blank frame.
+@@ -349,37 +932,55 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+              * pushbuffer executor's own dump follows its draw surface. With
+              * double buffering those are different buffers, and measuring
+              * progress from the executor's dump reports a blank screen while
+-             * the window is showing the title's logo. Ask the window. */
++             * the window is showing the title's logo. Ask the window.
++             *
++             * Counted in 16 ms ticks, as when this loop slept 16 ms a turn,
++             * so existing periods keep their meaning at any present rate. */
+             const char *dump = getenv("RECOMP_FB_DUMP");
+             const char *every = getenv("RECOMP_FB_WINDOW_DUMP_EVERY");
++            static DWORD tick0;
+             static int frames;
++            DWORD now = GetTickCount();
+             int period = every ? atoi(every) : 0;
+-            frames++;
+-            if (dump && period > 0) {
+-                if (frames % period == 0)
++            if (!tick0)
++                tick0 = now;
++            while (now - tick0 >= 16) {
++                tick0 += 16;
++                frames++;
++                if (dump && period > 0) {
++                    if (frames % period == 0)
++                        xbox_FramebufferDumpBmp(dump);
++                } else if (dump && frames == 600) {
+                     xbox_FramebufferDumpBmp(dump);
+-            } else if (dump && frames == 600) {
+-                xbox_FramebufferDumpBmp(dump);
++                }
+             }
+         }
+         {
+-            static DWORD t0;
++            static DWORD t0, shown_until;
+             static LONG f0;
+             DWORD now = GetTickCount();
+-            if (now - t0 >= 1000) {
++            if (s_notice_until != shown_until && (LONG)(s_notice_until - now) > 0) {
++                shown_until = s_notice_until;    /* a new notice: show it now */
++                SetWindowTextA(hwnd, s_notice);
++            } else if (now - t0 >= 1000 && (LONG)(s_notice_until - now) <= 0) {
+                 LONG f = s_flips;
+-                wchar_t tb[128];
+-                _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
++                wchar_t tb[160];
++                _snwprintf(tb, 159, L"%hs - %ls | FPS: %.1f | draws: %ld",
++                           s_cfg.title, s_title,
+                            t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
+                            (long)s_frame_draws);
+-                tb[127] = 0;
++                tb[159] = 0;
+                 SetWindowTextW(hwnd, tb);
+                 t0 = now; f0 = f;
+             }
+         }
+-        Sleep(16);
+     }
+ 
++    if (use_d3d) {
++        if (s_is_fullscreen)
++            toggle_fullscreen(hwnd);
++        d3d_release();
++    }
+     ReleaseDC(hwnd, hdc);
+     DestroyWindow(hwnd);
+     free(s_rgb);

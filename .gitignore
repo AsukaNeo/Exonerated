@@ -24,3 +24,5 @@ build/
 # project art is allowed
 !assets/
 !assets/*.png
+# F12 captures from the game window (game-derived)
+screenshots/

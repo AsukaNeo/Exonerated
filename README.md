@@ -61,6 +61,29 @@
 ```
    Keyboard: Enter = Start, Z = A, X = B, arrow keys to move. The intro movies play in a window of their own. `DR_NO_FMV=1` skips that window, but the game can then stall at a black screen after the intro, so leave it off for play.
 
+### Display
+
+The game window scales the 640×480 picture to any size and can go borderless fullscreen.
+
+| Key | Action |
+|---|---|
+| Alt+Enter or F11 | Toggle borderless fullscreen |
+| F12 | Save a screenshot to `screenshots/` |
+
+Settings go in `exonerated.ini`, in the folder you run from (or beside the exe); an environment variable of the same meaning overrides the file:
+
+```ini
+[display]
+vsync=1            ; RECOMP_VSYNC: 0 to turn it off
+filter=sharp       ; RECOMP_FILTER: sharp (crisp at any size), bilinear, nearest
+scale=fit          ; RECOMP_SCALE: fit (4:3 with black bars), integer, stretch
+fullscreen=0       ; RECOMP_FULLSCREEN: 1 to start fullscreen
+window_scale=2     ; RECOMP_WINDOW_SCALE: starting window size, times 640×480
+present=d3d11      ; RECOMP_PRESENT: gdi for the plain fallback
+```
+
+The run log's `[FBWIN] settings` line shows what was picked up.
+
 ### Gamepad
 
 Any XInput controller (Xbox 360 / One / Series, or another pad through Steam Input or DS4Windows) plays as player 1. It can be plugged in or swapped while the game runs.
