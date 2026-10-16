@@ -79,7 +79,7 @@ Any XInput controller (Xbox 360 / One / Series, or another pad through Steam Inp
 - The keyboard (`RECOMP_KEYBOARD=1`, on in `play.sh`) works alongside the pad on player 1.
 - The n-th connected XInput pad is the n-th player, whichever XInput slot Windows gave it. Only one Xbox pad is plugged in by default (`RECOMP_USB_PADS=1`).
 - `play.sh` plugs the pad into the port the Xbox calls player 1 (`RECOMP_USB_NDP=4 RECOMP_USB_PORT=2`). The toolkit's default, USB root port 1, is controller port 3: buttons and the left stick still work there, but code that reads only player 1's slot ignores it.
-- No rumble yet.
+- Rumble goes to the pad (it buzzes on hits and tackles). `RECOMP_RUMBLE=0` turns it off.
 - Each change of buttons or stick direction shows up in the run log as an `[INPUT] port N -> game:` line.
 
 ## Repository layout

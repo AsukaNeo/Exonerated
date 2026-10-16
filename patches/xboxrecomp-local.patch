@@ -3011,7 +3011,7 @@ index 14eee45..de6b7cf 100644
  
  int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
-index d45d8bb..62b7690 100644
+index d45d8bb..85bce48 100644
 --- a/src/usb/ohci.c
 +++ b/src/usb/ohci.c
 @@ -183,6 +183,22 @@ static int s_npads = 1;          /* RECOMP_USB_PADS */
@@ -3146,7 +3146,75 @@ index d45d8bb..62b7690 100644
      if (addr && addr < xbox_ContiguousAllocatedBytes())
          return OHCI_CONTIG_BASE + addr;
      return addr;
-@@ -703,7 +774,24 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+@@ -537,6 +608,23 @@ static uint8_t *guest_ptr(uint32_t va, uint32_t bytes)
+          ? (uint8_t *)xbox_GetMemoryOffset() + va : NULL;
+ }
+ 
++/* An OUT packet's data, which the title wrote through a plain pointer and
++ * converted with MmGetPhysicalAddress: rumble comes from the XINPUT_FEEDBACK
++ * the title passed XInputSetState, in its heap, not from contiguous memory.
++ * A heap page the title named that way is RAM even where the contiguous
++ * allocator handed out the same number, and so is anything above the
++ * window's 64 MB -- the rule the APU follows (mcpx_apu_phys). Read through
++ * bus_resolve, Deathrow's feedback came back as window bytes (EA 6A ...)
++ * instead of its 00 06 header. Otherwise as bus_resolve. */
++static const uint8_t *out_data_ptr(uint32_t addr, uint32_t bytes)
++{
++    uint32_t a = addr & 0x0FFFFFFFu;
++    if (a >= (64u << 20) || xbox_PhysRamNameMap()[a >> 12])
++        return guest_ok(a, bytes) ? (uint8_t *)xbox_GetMemoryOffset() + a
++                                  : NULL;
++    return guest_ptr(addr, bytes);
++}
++
+ /* Transfer counts for RECOMP_USB_STATS: input reports served, control
+  * transfer stages, and OUT packets (rumble) by endpoint. */
+ static unsigned long s_n_report, s_n_ctrl, s_n_out_ep0, s_n_out_other;
+@@ -649,11 +737,43 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
+          * control request's stages broke that request; Burnout 3 starts its
+          * engine-rev rumble on the Crash countdown and then paused with the
+          * pad unresponsive. */
++        /* Rumble arrives either way: the 6-byte output report on interrupt
++         * endpoint 2, or as the data stage of a SET_REPORT (21 09) on the
++         * control pipe. The pad model passes it on to the host pad. */
++        const uint8_t *data = len > 0 ? out_data_ptr(cbp, (uint32_t)len) : NULL;
++        {
++            /* The first few rumble packets: where they point, and what RAM
++             * and the window hold there, in case a buffer resolves wrong. */
++            static int shown;
++            if (len >= 2 && (endpoint != 0 || g_setup.bRequest == 0x09)
++                && shown < 4) {
++                uint32_t a = cbp & 0x0FFFFFFFu;
++                const uint8_t *ram = guest_ok(a, 2)
++                    ? (uint8_t *)xbox_GetMemoryOffset() + a : NULL;
++                const uint8_t *win = guest_ok(OHCI_CONTIG_BASE + a, 2)
++                    ? (uint8_t *)xbox_GetMemoryOffset() + OHCI_CONTIG_BASE + a
++                    : NULL;
++                shown++;
++                fprintf(stderr, "  [OHCI%d] OUT ep%u %d bytes at %08X (named %d, "
++                        "contig %d): ram %02X %02X window %02X %02X\n",
++                        hc->index, endpoint, len, cbp,
++                        a < (64u << 20) ? xbox_PhysRamNameMap()[a >> 12] : -1,
++                        a < (64u << 20) ? xbox_ContiguousPageMap()[a >> 12] : -1,
++                        ram ? ram[0] : 0xEE, ram ? ram[1] : 0xEE,
++                        win ? win[0] : 0xEE, win ? win[1] : 0xEE);
++                fflush(stderr);
++            }
++        }
+         moved = len;
+         if (endpoint == 0) {
++            if (data && g_setup_pending && g_setup.bmRequestType == 0x21
++                && g_setup.bRequest == 0x09)
++                usb_gamepad_output(pad, data, len);
+             g_setup_pending = 0;
+             s_n_out_ep0++;
+         } else {
++            if (data)
++                usb_gamepad_output(pad, data, len);
+             s_n_out_other++;
+         }
+     }
+@@ -703,7 +823,24 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
                  fflush(stderr);
              }
          }
@@ -3171,7 +3239,7 @@ index d45d8bb..62b7690 100644
          if (head & ED_HEAD_HALT) { ed = rd32(ed + 12) & ED_PTR_MASK; continue; }
  
          while ((head & ED_PTR_MASK) != tail
-@@ -716,6 +804,7 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+@@ -716,6 +853,7 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
               * descriptor on the done queue, newest first. */
              wr32(td, (rd32(td) & 0x0FFFFFFFu) | (cc << 28));
              wr32(td + 8, *done_head);
@@ -3179,7 +3247,7 @@ index d45d8bb..62b7690 100644
              *done_head = td;
              completed++;
  
-@@ -737,10 +826,49 @@ static void ohci_publish_done(OhciController *hc, uint32_t done_head)
+@@ -737,10 +875,49 @@ static void ohci_publish_done(OhciController *hc, uint32_t done_head)
  {
      uint32_t hcca = hc->reg[HcHCCA / 4];
  
@@ -3230,7 +3298,7 @@ index d45d8bb..62b7690 100644
  }
  
  /* Both runners add to the caller's done queue rather than publishing their
-@@ -924,12 +1052,16 @@ static void ohci_raise(OhciController *hc, uint32_t source)
+@@ -924,12 +1101,16 @@ static void ohci_raise(OhciController *hc, uint32_t source)
      uint32_t enable = hc->reg[HcInterruptEnable / 4];
      int claimed;
  
@@ -3248,7 +3316,7 @@ index d45d8bb..62b7690 100644
      if (s_trace || claimed >= 0) {
          static unsigned n;
          if (n++ < 20) {
-@@ -1071,7 +1203,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1071,7 +1252,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              unsigned port = pspec ? (unsigned)atoi(pspec) : 0u;
              if (port >= s_ndp) port = s_ndp - 1u;
              hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
@@ -3257,7 +3325,7 @@ index d45d8bb..62b7690 100644
              plugged = 1;
              s_plugged_pads = 1;
              first_port = port;
-@@ -1089,7 +1221,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1089,7 +1270,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              if (++settle > 50) {                 /* ~1 s after the last */
                  unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
                  hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
@@ -3266,7 +3334,7 @@ index d45d8bb..62b7690 100644
                  fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
                          s_plugged_pads + 1, port + 1, 10);
                  fflush(stderr);
-@@ -1121,7 +1253,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1121,7 +1302,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
               * controller zeroes, so a dword write is what hardware does. */
              if (hcca)
                  wr32(hcca + 0x80, hc->reg[HcFmNumber / 4]);
@@ -3275,7 +3343,7 @@ index d45d8bb..62b7690 100644
          }
  
          /* Be the bus master. ControlListEnable in HcControl says the driver
-@@ -1163,13 +1295,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1163,13 +1344,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
           && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
              if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
                                &pass_done))
@@ -3291,3 +3359,98 @@ index d45d8bb..62b7690 100644
          }
  
          /* One done queue per pass, covering all three lists.
+diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
+index bd00f3f..061340d 100644
+--- a/src/usb/usb_gamepad.c
++++ b/src/usb/usb_gamepad.c
+@@ -630,3 +630,75 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+     pad_script_apply(pad, out);
+     return 20;
+ }
++
++/* ---- the output report: rumble ------------------------------------------ */
++
++/*
++ * Six bytes, fixed like the input report:
++ *
++ *   0      report id, always 0
++ *   1      length, always 6
++ *   2..3   left (low-frequency) motor, 0..65535, little endian
++ *   4..5   right (high-frequency) motor
++ *
++ * which is XInput's XINPUT_VIBRATION as it stands, so the speeds go to the
++ * host pad unchanged. Only a change is sent on: a title refreshes its rumble
++ * every frame, and XInputSetState to a wireless pad is not free.
++ *
++ * RECOMP_RUMBLE=0 turns it off. A pad left buzzing when the process ends
++ * keeps buzzing on some drivers, so the motors are stopped at exit.
++ */
++static uint16_t s_rumble[USB_GAMEPAD_MAX][2];
++
++static void rumble_send(int pad, uint16_t left, uint16_t right)
++{
++    XBOX_VIBRATION v;
++    v.wLeftMotorSpeed = left;
++    v.wRightMotorSpeed = right;
++    xbox_InputSetState((DWORD)pad, &v);
++    s_rumble[pad][0] = left;
++    s_rumble[pad][1] = right;
++}
++
++static void rumble_stop_all(void)
++{
++    int pad;
++    for (pad = 0; pad < USB_GAMEPAD_MAX; pad++)
++        if (s_rumble[pad][0] || s_rumble[pad][1])
++            rumble_send(pad, 0, 0);
++}
++
++void usb_gamepad_output(int pad, const uint8_t *data, int len)
++{
++    static int enabled = -1;
++    static unsigned shown;
++    uint16_t left, right;
++
++    if (enabled < 0) {
++        const char *v = getenv("RECOMP_RUMBLE");
++        enabled = !(v && *v == '0');
++        if (enabled)
++            atexit(rumble_stop_all);
++    }
++    if (!enabled || pad < 0 || pad >= USB_GAMEPAD_MAX)
++        return;
++    if (len < 6 || data[0] != 0 || data[1] < 6) {
++        if (shown++ < 5) {
++            fprintf(stderr, "  [RUMBLE] pad %d: unexpected output report, %d "
++                    "bytes: %02X %02X ...\n", pad, len,
++                    len > 0 ? data[0] : 0, len > 1 ? data[1] : 0);
++            fflush(stderr);
++        }
++        return;
++    }
++    left  = (uint16_t)(data[2] | data[3] << 8);
++    right = (uint16_t)(data[4] | data[5] << 8);
++    if (left == s_rumble[pad][0] && right == s_rumble[pad][1])
++        return;
++    if (shown++ < 40) {
++        fprintf(stderr, "  [RUMBLE] pad %d: left %u right %u\n", pad,
++                (unsigned)left, (unsigned)right);
++        fflush(stderr);
++    }
++    rumble_send(pad, left, right);
++}
+diff --git a/src/usb/usb_gamepad.h b/src/usb/usb_gamepad.h
+index 18291d7..f447290 100644
+--- a/src/usb/usb_gamepad.h
++++ b/src/usb/usb_gamepad.h
+@@ -36,6 +36,10 @@ int usb_gamepad_control(int pad, const UsbSetup *setup, uint8_t *out, int max);
+ /* Fill in pad `pad`'s 20-byte input report. Returns the byte count written. */
+ int usb_gamepad_report(int pad, uint8_t *out, int max);
+ 
++/* An output report the host sent pad `pad` -- rumble, on the interrupt OUT
++ * endpoint or as SET_REPORT data -- passed on to host XInput pad `pad`. */
++void usb_gamepad_output(int pad, const uint8_t *data, int len);
++
+ /* The address the host assigned pad `pad` with SET_ADDRESS, 0 until it does,
+  * and whether it has been configured. */
+ uint8_t usb_gamepad_address(int pad);

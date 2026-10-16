@@ -233,8 +233,9 @@ void recomp_unimpl(const char *text, uint32_t va)
  * emulated pad lands on root port RECOMP_USB_PORT, and XAPI numbers root
  * ports 3 4 1 2 as players 1-4, so RECOMP_USB_NDP=4 RECOMP_USB_PORT=2
  * makes it player 1. Some game code reads only player 1's record.
- * Rumble is not forwarded: the game's XInputSetState (sub_0024451B) goes out
- * as a USB output report, and the OHCI model drops those. */
+ * Rumble needs nothing here: the game's XInputSetState (sub_0024451B) goes
+ * out as a USB output report, which the OHCI model hands to usb_gamepad.c
+ * and on to the host pad. */
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t xbox_InputGetState(uint32_t port, void *state);
 extern void sub_002444AC_gen(void);
