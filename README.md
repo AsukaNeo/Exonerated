@@ -36,6 +36,7 @@
 - 🚧 Texture artifacts on some player uniforms
 - 🚧 Fixed-function lighting, audio and in-game video are incomplete
 - ⛔ No release executable yet: building from source only
+- ⛔ Network features (Xbox Live, System Link) are not planned and will not be implemented; play is local only
 
 ## What you need
 
