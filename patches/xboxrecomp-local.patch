@@ -1,3 +1,31 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+index 258048c..3947895 100644
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -19,6 +19,7 @@
+  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <stdlib.h>
+ #include "apu_state.h"
+ #include "apu.h"
+ #include "apu_xaudio2.h"
+@@ -75,7 +76,15 @@ extern uint32_t xbox_ContiguousAllocatedBytes(void);
+ 
+ uint8_t *mcpx_apu_phys(uint64_t addr)
+ {
++    static int image_first = -1;                          /* [ap1] */
+     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
++    if (image_first < 0) {
++        image_first = getenv("RECOMP_APU_PHYS_IMAGE_FIRST") != NULL;
++        fprintf(stderr, "[APU] physical addresses: %s first\n",
++                image_first ? "image" : "contiguous arena");
++    }
++    if (!image_first && a < xbox_ContiguousAllocatedBytes())
++        return g_apu_ram_ptr + 0x80000000u + a;
+     if (a >= g_xbox_image_lo && a < g_xbox_image_hi)
+         return g_apu_ram_ptr + a;
+     if (a < xbox_ContiguousAllocatedBytes())
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
 index c65ba43..04c2f57 100644
 --- a/src/kernel/kernel_bridge.c

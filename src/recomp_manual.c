@@ -558,3 +558,20 @@ void sub_001197B0(void)
 
 /* DIAG: match runner (BDAIngame init + match loop). */
 __declspec(dllimport) unsigned long __stdcall GetTickCount(void);
+
+/* DirectSound DSP command doorbell (sub_001BF00C writes 3 to base+0x810 and
+ * spins until the DSP clears it). Logs the address for RECOMP_APU_DSP_ACK.
+ * Logging only. */
+extern void sub_001BF00C_gen(void);
+void sub_001BF00C(void)
+{
+    static uint32_t last;
+    uint32_t o = g_ecx, a, b, base;
+    if (o && (a = MEM32(o + 8)) != 0 && (b = MEM32(a + 0x10)) != 0
+          && (base = MEM32(b)) != 0 && base + 0x810 != last) {
+        last = base + 0x810;
+        fprintf(stderr, "[DSPDB] DirectSound DSP doorbell at 0x%08X (this=0x%08X)\n", last, o);
+        fflush(stderr);
+    }
+    sub_001BF00C_gen();
+}
