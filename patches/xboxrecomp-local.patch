@@ -1,5 +1,118 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+index 1f664a3..06675c7 100644
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -235,6 +235,10 @@ extern APU_TLS uint32_t g_fs_base;
+  * while a guest thread sits at raised IRQL, which is when the single-CPU
+  * console could not have taken the interrupt. The routine acknowledges by
+  * writing ISTS, which drops the line through update_irq. */
++/* [ap2] */
++extern volatile long apu_ap2_ntf[3], apu_ap2_last_empty_voice;
++static volatile long apu_ap2_irq[2];
++
+ static void apu_deliver_irq(MCPXAPUState *d)
+ {
+     /* Per thread, like the g_fs_base it guards: a new instance's frame
+@@ -280,6 +284,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     xbox_worker_stack_free(slot);
+     qemu_mutex_lock(&d->lock);
+ 
++    if (g_eax & 1) apu_ap2_irq[0]++; else apu_ap2_irq[1]++;   /* [ap2] */
+     {
+         static unsigned n;
+         if (n++ < 3) {
+@@ -1045,6 +1050,11 @@ static void apu_irq_stats_line(void)
+         fprintf(stderr, "[APU-IRQ] traps %u se_frames %u fe-trapped-frames %u underruns %u\n",
+                 apu_irq_stats.traps, apu_irq_stats.se_frames,
+                 apu_irq_stats.fe_trapped_frames, xa2_underruns());
++    if (s_irq_next_ns)                                    /* [ap2] */
++        fprintf(stderr, "[APU-NTF] voice_off %ld  persist_empty %ld (last voice %ld)  "
++                "seg_done %ld  irq claimed %ld declined %ld\n",
++                apu_ap2_ntf[0], apu_ap2_ntf[1], apu_ap2_last_empty_voice,
++                apu_ap2_ntf[2], apu_ap2_irq[0], apu_ap2_irq[1]);
+     s_irq_next_ns = now + 5000000000ull;
+ }
+ 
+diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
+index 128d86f..81bdb5c 100644
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -47,6 +47,10 @@ static const struct {
+  * Notify status helper
+  * ============================================================ */
+ 
++/* [ap2] notification counters: voice_off, persist-empty, segment done */
++volatile long apu_ap2_ntf[3];
++volatile long apu_ap2_last_empty_voice = -1;
++
+ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
+                               int status)
+ {
+@@ -140,6 +144,7 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+         assert(d->vp.ssl[v].ssl_index <= 1);
+         notifier += d->vp.ssl[v].ssl_index;
+     }
++    apu_ap2_ntf[0]++;                                   /* [ap2] */
+     set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
+ }
+ 
+@@ -1139,6 +1144,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 d->vp.ssl[v].ssl_index = 0;
+                 voice_off(d, (uint16_t)v);
+             } else {
++                apu_ap2_ntf[1]++; apu_ap2_last_empty_voice = (long)v;   /* [ap2] */
+                 set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE +
+                                   d->vp.ssl[v].ssl_index,
+                                   NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
+@@ -1276,6 +1282,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 int next_index = (ssl_index + 1) % 2;
+                 d->vp.ssl[v].ssl_index = next_index;
+                 d->vp.ssl[v].ssl_seg = 0;
++                apu_ap2_ntf[2]++;                       /* [ap2] */
+                 set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE + ssl_index,
+                                   NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
+             }
+@@ -1629,6 +1636,9 @@ static void vp_trace_positions(MCPXAPUState *d)
+     }
+ }
+ 
++/* [ap3] voice-list cycles cut short by the revisit guard */
++volatile long apu_ap3_cycles;
++
+ void mcpx_apu_vp_frame(MCPXAPUState *d,
+                         float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
+@@ -1641,6 +1651,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+         next = voice_list_regs[list].next;
+ 
+         d->regs[current] = d->regs[top];
++        uint32_t seen[(MCPX_HW_MAX_VOICES + 31) / 32] = { 0 };   /* [ap3] */
+ 
+         for (int i = 0; d->regs[current] != 0xFFFF; i++) {
+             if (i >= MCPX_HW_MAX_VOICES) {
+@@ -1649,6 +1660,20 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+             }
+ 
+             uint16_t v = (uint16_t)d->regs[current];
++            /* [ap3] A voice already processed this frame means the list
++             * loops back on itself (au22: voice 68 linked to itself during
++             * the movie). Walking on until the 256-entry cap processes the
++             * cycle over and over under d->lock; stop at the revisit. */
++            if (v < MCPX_HW_MAX_VOICES) {
++                if (seen[v >> 5] & (1u << (v & 31))) {
++                    long c = ++apu_ap3_cycles;
++                    if (c <= 5)
++                        fprintf(stderr, "[APU-LOOP] list %d revisits voice %u after %d (cycle %ld)\n",
++                                list, (unsigned)v, i, c);
++                    break;
++                }
++                seen[v >> 5] |= 1u << (v & 31);
++            }
+             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+ 
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 965dd08..52f0b6d 100644
+index 965dd08..23777e7 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -267,6 +267,38 @@ static void kernel_data_init(void)
@@ -95,7 +208,202 @@ index 965dd08..52f0b6d 100644
      xbox_HalReturnToFirmware(routine);
  }
  
-@@ -2498,6 +2577,9 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+@@ -1963,7 +2042,102 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
+     return h;
+ }
+ 
+-/* ── KeSetEvent (ordinal 145) ────────────────────────────── */
++/* [ke3] vblank outcomes: claimed, declined, no ISR, ISR not callable */
++static volatile LONG ke3_vb[4], ke3_vbn, ke3_sigs, ke3_sigs_this;
++static volatile LONG ke3_watch;
++/* [ke2] signal calls on title events */
++void xbox_DumpGuestStack(const char *tag);
++static void ke2_sig(const char *what, uint32_t va)
++{
++    static volatile LONG n;
++    LONG k = InterlockedIncrement(&n);
++    InterlockedIncrement(&ke3_sigs);                       /* [ke3] */
++    if ((LONG)va == ke3_watch) InterlockedIncrement(&ke3_sigs_this);
++    if (k > 40)
++        return;
++    fprintf(stderr, "  [KSIG] %s %08X hdr %08X state %08X tid %lu ret %08X\n", what, va,
++            BRIDGE_MEM32(va), BRIDGE_MEM32(va + 4), (unsigned long)GetCurrentThreadId(),
++            BRIDGE_MEM32(g_esp - 4));
++    if (k <= 12)
++        xbox_DumpGuestStack("[KSIG]");
++    fflush(stderr);
++}
++
++/* [ke1] title-built KEVENTs on the fallback path: SignalState is the truth. */
++static int ke1_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_KEVT_POLL");
++        on = !(e && *e == '0');
++    }
++    return on;
++}
++static int ke1_is_event(uint32_t va, int *type)
++{
++    uint32_t hdr;
++    if (!ke1_on() || va < 0x10000u || (va & 3u))
++        return 0;
++    if (va >= 0x04000000u && (va < 0x80000000u || va >= 0x84000000u))
++        return 0;
++    hdr = BRIDGE_MEM32(va);
++    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
++        return 0;
++    *type = (int)(hdr & 0xFFu);
++    return 1;
++}
++static uint32_t ke1_wait(uint32_t va, int type, uint32_t timeout_ptr)
++{
++    static volatile LONG shown;
++    volatile LONG *state = (volatile LONG *)XBOX_TO_NATIVE(va + 4);
++    ULONGLONG t0 = GetTickCount64(), limit = (ULONGLONG)-1;
++    int warned = 0;
++    unsigned spins = 0;
++    if (timeout_ptr) {
++        int64_t t = *(int64_t *)XBOX_TO_NATIVE(timeout_ptr);
++        limit = t < 0 ? (ULONGLONG)(-t / 10000) : 0;   /* absolute: poll once */
++    }
++    if (InterlockedIncrement(&shown) <= 8) {
++        fprintf(stderr, "  [KEVT] wait on title event %08X (%s, %s) by tid %lu\n", va,
++                type ? "sync" : "notify", timeout_ptr ? "timeout" : "no timeout",
++                (unsigned long)GetCurrentThreadId());
++        fflush(stderr);
++    }
++    for (;;) {
++        LONG v = *state;
++        if (v != 0) {
++            if (type == 1 && InterlockedCompareExchange(state, 0, v) != v)
++                continue;                          /* another waiter took it */
++            return 0;                              /* STATUS_SUCCESS */
++        }
++        if (GetTickCount64() - t0 >= limit)
++            return 0x102;                          /* STATUS_TIMEOUT */
++        if (warned && warned < 10 && GetTickCount64() - t0 > 3000u * (warned + 1)) {
++            warned++;                                       /* [ke3] */
++            fprintf(stderr, "  [KEVT] %08X waiting %u s: vblanks %ld (claimed %ld declined %ld "
++                    "noisr %ld nofn %ld) sets %ld (this %ld) state %08X\n", va, 3u * warned,
++                    ke3_vbn, ke3_vb[0], ke3_vb[1], ke3_vb[2], ke3_vb[3], ke3_sigs,
++                    ke3_sigs_this, BRIDGE_MEM32(va + 4));
++            fflush(stderr);
++        }
++        if (!warned && GetTickCount64() - t0 > 3000) {
++            warned = 1;
++            InterlockedExchange(&ke3_watch, (LONG)va);      /* [ke3] */
++            InterlockedExchange(&ke3_sigs_this, 0);
++            fprintf(stderr, "  [KEVT] title event %08X still unsignalled after 3 s (tid %lu)\n",
++                    va, (unsigned long)GetCurrentThreadId());
++            fprintf(stderr, "  [KEVT]   %08X: %08X %08X %08X %08X  ret %08X\n", va,   /* [ke2] */
++                    BRIDGE_MEM32(va), BRIDGE_MEM32(va + 4), BRIDGE_MEM32(va + 8),
++                    BRIDGE_MEM32(va + 12), BRIDGE_MEM32(g_esp - 4));
++            xbox_DumpGuestStack("[KEVT]");
++            fflush(stderr);
++        }
++        if (++spins < 64) SwitchToThread(); else Sleep(1);
++    }
++}
++
++/* ── KeSetEvent (ordinal 145) ─
++───────────────────────────── */
+ static void bridge_KeSetEvent(void)
+ {
+     uint32_t guest_va = STACK_ARG(0);
+@@ -1985,6 +2159,15 @@ static void bridge_KeSetEvent(void)
+         }
+     }
+     h = ke_shadow_lookup(guest_va);
++    if (!h) {
++        int kt;                                     /* [ke1] */
++        if (ke1_is_event(guest_va, &kt)) {
++            ke2_sig("KeSetEvent", guest_va);          /* [ke2] */
++            g_eax = (uint32_t)InterlockedExchange(
++                (volatile LONG *)XBOX_TO_NATIVE(guest_va + 4), 1) != 0;
++            return;
++        }
++    }
+     if (!h)
+         h = bridge_resolve_handle(guest_va);
+     if (!h)
+@@ -1996,6 +2179,24 @@ static void bridge_KeSetEvent(void)
+ }
+ 
+ /* ── KeWaitForSingleObject (ordinal 159) ─────────────────── */
++/* [kw1] non-success waits */
++static void kw1_note(uint32_t object, uint32_t timeout_ptr)
++{
++    static volatile LONG n;
++    int64_t t;
++    if (g_eax == 0)
++        return;
++    t = timeout_ptr ? *(int64_t *)XBOX_TO_NATIVE(timeout_ptr) : 0;
++    if (timeout_ptr && t == 0)
++        return;                                  /* a poll, not a wait */
++    if (InterlockedIncrement(&n) <= 40) {
++        fprintf(stderr, "  [KWAIT] obj %08X timeout %s%lld ms -> %08X, tid %lu, ret %08X\n",
++                object, timeout_ptr ? "" : "none ", (long long)(t / -10000),
++                g_eax, (unsigned long)GetCurrentThreadId(), BRIDGE_MEM32(g_esp));
++        fflush(stderr);
++    }
++}
++
+ static void bridge_KeWaitForSingleObject(void)
+ {
+     uint32_t object = STACK_ARG(0);
+@@ -2016,11 +2217,19 @@ static void bridge_KeWaitForSingleObject(void)
+                 (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+             if (g_eax == 0 && type == 1)               /* synchronization: consumed */
+                 BRIDGE_MEM32(object + 4) = 0;
++            kw1_note(object, timeout_ptr);   /* [kw1] */
+             return;
+         }
+     }
+ 
+     h = ke_shadow_lookup(object);
++    if (!h) {
++        int kt;                                     /* [ke1] */
++        if (ke1_is_event(object, &kt)) {
++            g_eax = ke1_wait(object, kt, timeout_ptr);
++            return;
++        }
++    }
+     if (!h)
+         h = bridge_resolve_handle(object);
+     if (!h)
+@@ -2029,6 +2238,7 @@ static void bridge_KeWaitForSingleObject(void)
+     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
+         h, wait_reason, wait_mode,
+         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
++    kw1_note(object, timeout_ptr);   /* [kw1] */
+ }
+ 
+ /* ── NtWaitForSingleObject (ordinal 233) ─────────────────── */
+@@ -2478,7 +2688,20 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
+     g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
+     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
+-    { int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql); }
++    {                                                   /* [dp1] */
++        ULONGLONG _t0 = GetTickCount64();
++        int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql);
++        {
++            ULONGLONG _dt = GetTickCount64() - _t0;
++            static volatile LONG _n;
++            if (_dt > 20 && InterlockedIncrement(&_n) <= 40) {
++                fprintf(stderr, "  [DPCSLOW] routine %08X (dpc %08X) took %llu ms, tid %lu\n",
++                        routine, dpc_va, (unsigned long long)_dt,
++                        (unsigned long)GetCurrentThreadId());
++                fflush(stderr);
++            }
++        }
++    }
+     return 1;
+ }
+ 
+@@ -2498,6 +2721,9 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
   * ever contend, this wants the interrupt object's own lock rather than a
   * global one.
   */
@@ -105,7 +413,7 @@ index 965dd08..52f0b6d 100644
  static void bridge_KeSynchronizeExecution(void)
  {
      uint32_t routine = STACK_ARG(1);
-@@ -2518,7 +2600,10 @@ static void bridge_KeSynchronizeExecution(void)
+@@ -2518,7 +2744,10 @@ static void bridge_KeSynchronizeExecution(void)
       * the dummy return address and the argument, so g_esp needs no fixup. */
      g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
      g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
@@ -117,7 +425,149 @@ index 965dd08..52f0b6d 100644
      /* g_eax is whatever the routine returned, which is this call's result. */
  }
  
-@@ -3360,6 +3445,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
+@@ -2719,9 +2948,12 @@ static void kernel_vblank_tick(void)
+         return;
+     next_ms = now + 16;                       /* ~60 Hz */
+     InterlockedIncrement(&g_vblank_total);
++    InterlockedIncrement(&ke3_vbn);                          /* [ke3] */
+ 
+-    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
++    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
++        InterlockedIncrement(&ke3_vb[2]);
+         return;
++    }
+ 
+     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PCRTC_INTR_0) |= NV2A_PCRTC_INTR_VBLANK;
+     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)   |= NV2A_PMC_INTR_PCRTC;
+@@ -2729,6 +2961,7 @@ static void kernel_vblank_tick(void)
+     {
+         static unsigned n;
+         int claimed = kernel_raise_interrupt(NV2A_VECTOR);
++        InterlockedIncrement(&ke3_vb[claimed < 0 ? 3 : claimed ? 0 : 1]);   /* [ke3] */
+         if (n++ < 3)
+             fprintf(stderr, "  [NV2A] vblank -> ISR %s\n",
+                     claimed < 0 ? "not callable" :
+@@ -2767,6 +3000,111 @@ static void kernel_drain_dpcs(void)
+  * Initializes a DPC object. The Xbox KDPC structure is 32 bytes.
+  * We zero it and set the routine and context pointers.
+  */
++/* ---- [wt1] hardware write watchpoint (diagnostic) ------------------------ */
++void xbox_DumpGuestStack(const char *tag);
++#if defined(_WIN32)
++#include <tlhelp32.h>
++static volatile uint32_t s_wt_va;
++static volatile uintptr_t s_wt_host;
++
++static LONG CALLBACK wt_veh(PEXCEPTION_POINTERS ep)
++{
++    static volatile LONG hits;
++    LONG h;
++    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP
++            || !(ep->ContextRecord->Dr6 & 0xF))
++        return EXCEPTION_CONTINUE_SEARCH;
++    h = InterlockedIncrement(&hits);
++    if (h <= 12) {
++        uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
++        fprintf(stderr, "[WATCH] hit %ld tid %lu: [%08X] = %08X  rip rva 0x%llX\n"
++                "[WATCH]   guest eax=%08X ecx=%08X edx=%08X ebx=%08X esi=%08X edi=%08X esp=%08X\n",
++                (long)h, (unsigned long)GetCurrentThreadId(), s_wt_va, BRIDGE_MEM32(s_wt_va),
++                (unsigned long long)(ep->ContextRecord->Rip - base),
++                g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi, g_esp);
++        xbox_DumpGuestStack("[WATCH]");
++        fflush(stderr);
++    }
++    ep->ContextRecord->Dr6 = 0;
++    return EXCEPTION_CONTINUE_EXECUTION;
++}
++
++static DWORD WINAPI wt_arm_thread(LPVOID unused)
++{
++    DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
++    (void)unused;
++    for (;;) {
++        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++        THREADENTRY32 te;
++        te.dwSize = sizeof te;
++        if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
++            do {
++                HANDLE th;
++                if (te.th32OwnerProcessID != pid || te.th32ThreadID == me)
++                    continue;
++                th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT
++                                | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
++                if (!th)
++                    continue;
++                if (SuspendThread(th) != (DWORD)-1) {
++                    CONTEXT c;
++                    memset(&c, 0, sizeof c);
++                    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
++                    if (GetThreadContext(th, &c) && c.Dr0 != s_wt_host) {
++                        c.Dr0 = s_wt_host;
++                        /* L0, RW0 = write (01), LEN0 = 4 bytes (11) */
++                        c.Dr7 = (c.Dr7 & ~0xF0003ull) | 1ull | (1ull << 16) | (3ull << 18);
++                        SetThreadContext(th, &c);
++                    }
++                    ResumeThread(th);
++                }
++                CloseHandle(th);
++            } while (Thread32Next(snap, &te));
++        }
++        if (snap != INVALID_HANDLE_VALUE)
++            CloseHandle(snap);
++        Sleep(20);
++    }
++    return 0;
++}
++
++static void wt_arm(uint32_t va)
++{
++    static volatile LONG started;
++    va &= ~3u;
++    s_wt_va = va;
++    s_wt_host = (uintptr_t)XBOX_TO_NATIVE(va);
++    fprintf(stderr, "[WATCH] armed on guest %08X (value %08X)\n", va, BRIDGE_MEM32(va));
++    fflush(stderr);
++    if (InterlockedCompareExchange(&started, 1, 0) == 0) {
++        AddVectoredExceptionHandler(1, wt_veh);
++        CreateThread(NULL, 0, wt_arm_thread, NULL, 0, NULL);
++    }
++}
++#else
++static void wt_arm(uint32_t va) { (void)va; }
++#endif
++
++static void wt_note_dpc(uint32_t dpc_va, uint32_t routine, uint32_t context)
++{
++    static int init = -1;
++    static uint32_t want, n;
++    if (init < 0) {
++        const char *e = getenv("RECOMP_WATCH_CTX"), *v = getenv("RECOMP_WATCH_VA");
++        want = e ? (uint32_t)strtoul(e, 0, 0) : 0;
++        init = 1;
++        if (v && *v)
++            wt_arm((uint32_t)strtoul(v, 0, 0));
++    }
++    if (!want)
++        return;
++    if (n++ < 40)
++        fprintf(stderr, "[DPCINIT] dpc %08X routine %08X ctx %08X\n", dpc_va, routine, context);
++    if (context == want)
++        wt_arm(dpc_va + 16);
++}
++/* ---- end [wt1] ----------------------------------------------------------- */
++
+ static void bridge_KeInitializeDpc(void)
+ {
+     uint32_t dpc_va = STACK_ARG(0);
+@@ -2789,6 +3127,7 @@ static void bridge_KeInitializeDpc(void)
+     BRIDGE_MEM16(dpc_va + 0) = 0x13;   /* Type */
+     BRIDGE_MEM32(dpc_va + 12) = routine; /* DeferredRoutine */
+     BRIDGE_MEM32(dpc_va + 16) = context; /* DeferredContext */
++    wt_note_dpc(dpc_va, routine, context);   /* [wt1] */
+     g_eax = 0;
+ }
+ 
+@@ -3360,6 +3699,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
      return (HANDLE)(uintptr_t)token;
  }
  
@@ -127,7 +577,207 @@ index 965dd08..52f0b6d 100644
  static HANDLE bridge_take_handle(uint32_t token)
  {
      if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-@@ -10424,3 +10512,17 @@ void xbox_kernel_bridge_init(void)
+@@ -7660,6 +8002,8 @@ static void bridge_KePulseEvent(void)
+         }
+     }
+     h = ke_shadow_lookup(guest_va);
++    if (!h)
++        ke2_sig("KePulseEvent", guest_va);         /* [ke2] */
+     if (!h)
+         h = XBOX_TO_NATIVE(guest_va);
+     if (h)
+@@ -7728,6 +8072,14 @@ static void bridge_KeResetEvent(void)
+         }
+     }
+     h = ke_shadow_lookup(guest_va);
++    if (!h) {
++        int kt;                                     /* [ke1] */
++        if (ke1_is_event(guest_va, &kt)) {
++            BRIDGE_MEM32(guest_va + 4) = 0;
++            g_eax = 0;
++            return;
++        }
++    }
+     if (!h)
+         h = XBOX_TO_NATIVE(guest_va);
+     if (h)
+@@ -7960,6 +8312,15 @@ static void bridge_KeSetEventBoostPriority(void)
+     (void)increment;
+ 
+     h = ke_shadow_lookup(guest_va);
++    if (!h) {
++        int kt;                                     /* [ke1] */
++        if (ke1_is_event(guest_va, &kt)) {
++            ke2_sig("KeSetEventBoost", guest_va);     /* [ke2] */
++            BRIDGE_MEM32(guest_va + 4) = 1;
++            g_eax = 0;
++            return;
++        }
++    }
+     if (!h)
+         h = XBOX_TO_NATIVE(guest_va);
+     if (h)
+@@ -10284,6 +10645,151 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count)
+     g_ordinal_remap_count = count;
+ }
+ 
++/* [sp1] where is every thread spending its time? (diagnostic, Win32)
++ * RECOMP_SAMPLE_MS=50: a helper thread suspends each thread of the process
++ * every 50 ms, unwinds its host stack and keeps the first 4 frames inside the
++ * exe. Every 10 s the 12 most frequent (thread, chain) pairs are printed as
++ * [SAMPLE] lines; resolve the rvas with sym.py. Nothing is printed while a
++ * thread is suspended (it may hold the CRT lock). */
++#ifdef _WIN32
++#include <tlhelp32.h>
++typedef struct { DWORD tid; ULONG64 r[8]; unsigned n; } sp1_ent;   /* [sp2] */
++static sp1_ent sp1_h[512];
++static int sp1_hn;
++static unsigned sp1_lost;
++
++static void sp1_add(DWORD tid, const ULONG64 *r)
++{
++    int i;
++    for (i = 0; i < sp1_hn; i++)
++        if (sp1_h[i].tid == tid && !memcmp(sp1_h[i].r, r, sizeof sp1_h[i].r)) {
++            sp1_h[i].n++;
++            return;
++        }
++    if (sp1_hn < (int)(sizeof sp1_h / sizeof sp1_h[0])) {
++        sp1_h[sp1_hn].tid = tid;
++        memcpy(sp1_h[sp1_hn].r, r, sizeof sp1_h[0].r);
++        sp1_h[sp1_hn].n = 1;
++        sp1_hn++;
++    } else {
++        sp1_lost++;
++    }
++}
++
++static void sp1_dump(unsigned total)
++{
++    int k, i, best;
++    fprintf(stderr, "[SAMPLE] ---- %u samples, %d distinct, %u not kept ----\n",
++            total, sp1_hn, sp1_lost);
++    for (k = 0; k < 40; k++) {
++        best = -1;
++        for (i = 0; i < sp1_hn; i++)
++            if (sp1_h[i].n && (best < 0 || sp1_h[i].n > sp1_h[best].n))
++                best = i;
++        if (best < 0)
++            break;
++        {
++            int j;
++            fprintf(stderr, "[SAMPLE] %5u tid %5lu rip rva", sp1_h[best].n,
++                    (unsigned long)sp1_h[best].tid);
++            for (j = 0; j < 8 && sp1_h[best].r[j]; j++)
++                fprintf(stderr, "%s0x%llX", j ? " <- " : " ", (unsigned long long)sp1_h[best].r[j]);
++            fprintf(stderr, "\n");
++        }
++        sp1_h[best].n = 0;
++    }
++    fflush(stderr);
++    sp1_hn = 0;
++    sp1_lost = 0;
++}
++
++static DWORD WINAPI sp1_thread(LPVOID arg)
++{
++    DWORD ms = (DWORD)(uintptr_t)arg, self = GetCurrentThreadId();
++    DWORD pid = GetCurrentProcessId();
++    ULONG64 base = (ULONG64)(uintptr_t)GetModuleHandleA(NULL), size;
++    ULONGLONG next = GetTickCount64() + 10000;
++    unsigned total = 0;
++    {
++        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)(uintptr_t)base;
++        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(uintptr_t)(base + dos->e_lfanew);
++        size = nt->OptionalHeader.SizeOfImage;
++    }
++    for (;;) {
++        HANDLE snap;
++        THREADENTRY32 te;
++        BOOL ok;
++        Sleep(ms);
++        snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++        if (snap == INVALID_HANDLE_VALUE)
++            continue;
++        te.dwSize = sizeof te;
++        for (ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
++            HANDLE t;
++            CONTEXT c;
++            ULONG64 r[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++            int k = 0, d, got = 0;
++            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
++                continue;
++            t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
++                           FALSE, te.th32ThreadID);
++            if (!t)
++                continue;
++            if (SuspendThread(t) != (DWORD)-1) {
++                memset(&c, 0, sizeof c);
++                c.ContextFlags = CONTEXT_FULL;
++                if (GetThreadContext(t, &c)) {
++                    got = 1;
++                    for (d = 0; d < 40 && k < 8; d++) {
++                        ULONG64 ip = c.Rip, ib = 0;
++                        PRUNTIME_FUNCTION f;
++                        if (ip >= base && ip < base + size)
++                            r[k++] = ip - base;
++                        f = RtlLookupFunctionEntry(ip, &ib, NULL);
++                        if (!f) {
++                            if (!c.Rsp) break;
++                            c.Rip = *(ULONG64 *)(uintptr_t)c.Rsp;
++                            c.Rsp += 8;
++                        } else {
++                            PVOID hd;
++                            ULONG64 ef;
++                            RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, ip, f, &c, &hd, &ef, NULL);
++                        }
++                        if (!c.Rip)
++                            break;
++                    }
++                }
++                ResumeThread(t);
++            }
++            CloseHandle(t);
++            if (got && k) {
++                sp1_add(te.th32ThreadID, r);
++                total++;
++            }
++        }
++        CloseHandle(snap);
++        if (GetTickCount64() >= next) {
++            sp1_dump(total);
++            total = 0;
++            next = GetTickCount64() + 10000;
++        }
++    }
++    return 0;
++}
++
++static void sp1_start(void)
++{
++    const char *e = getenv("RECOMP_SAMPLE_MS");
++    DWORD ms = e && *e ? (DWORD)strtoul(e, NULL, 0) : 0;
++    if (!ms)
++        return;
++    CreateThread(NULL, 0, sp1_thread, (LPVOID)(uintptr_t)ms, 0, NULL);
++    fprintf(stderr, "[SAMPLE] sampling every %lu ms\n", (unsigned long)ms);
++}
++#else
++static void sp1_start(void) {}
++#endif
++
+ void xbox_kernel_bridge_init(void)
+ {
+     int i;
+@@ -10293,6 +10799,7 @@ void xbox_kernel_bridge_init(void)
+     DWORD old_protect;
+ 
+     guest_cpu_join();          /* the caller goes on to run the title's entry point */
++    sp1_start();               /* [sp1] */
+     fprintf(stderr, "  Kernel thunk bridge: resolving %d entries at 0x%08X\n",
+             g_thunk_table_count, g_thunk_table_base);
+ 
+@@ -10424,3 +10931,17 @@ void xbox_kernel_bridge_init(void)
              KERNEL_VA_BASE, KERNEL_VA_BASE + (resolved - 1) * 4);
  
  }
@@ -1760,7 +2410,7 @@ index c3fba75..a6712da 100644
 +    return 0;
 +}
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 362cefe..94d7e62 100644
+index 362cefe..ef36ad0 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -438,6 +438,7 @@ static volatile LONG g_nv2a_ack_stop = 0;
@@ -1945,3 +2595,321 @@ index 362cefe..94d7e62 100644
      }
  
      for (i = 0; i < 400 && esp; i++) {
+@@ -4039,6 +4154,20 @@ static void contig_take(uint32_t first, uint32_t n)
+         g_contig_first_free++;
+ }
+ 
++/* [cf1] contiguous traffic on the low pages, unthrottled, with the caller. */
++static void cf1_note(const char *what, uint32_t va, uint32_t pages)
++{
++    extern RECOMP_TLS uint32_t g_esp;
++    uint32_t ret = 0;
++    if (va >= XBOX_CONTIG_BASE + 8u * 4096u)
++        return;
++    if (g_esp >= 0x10000u && g_esp < 0x04000000u)
++        ret = *(volatile uint32_t *)((uintptr_t)g_memory_offset + g_esp);
++    fprintf(stderr, "  [CF] %s 0x%08X %u KB (tid %lu, guest [esp] %08X)\n", what, va,
++            pages * 4u, (unsigned long)GetCurrentThreadId(), ret);
++    fflush(stderr);
++}
++
+ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+                                 uint32_t phys_lo, uint32_t phys_hi)
+ {
+@@ -4083,6 +4212,7 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+     if (result) {
+         g_contig_allocs++;
+         contig_report("alloc", result, n);
++        cf1_note("alloc", result, n);   /* [cf1] */
+     } else {
+         uint32_t best = 0, run = 0;
+         for (q = 0; q < CONTIG_USABLE; q++) {
+@@ -4174,6 +4304,7 @@ int xbox_ContiguousFree(uint32_t va)
+         g_contig_first_free = first;
+     g_contig_frees++;
+     contig_report("free", va, n);
++    cf1_note("free", va, n);   /* [cf1] */
+     contig_unlock();
+     return 1;
+ }
+diff --git a/src/usb/ohci.c b/src/usb/ohci.c
+index d45d8bb..62b7690 100644
+--- a/src/usb/ohci.c
++++ b/src/usb/ohci.c
+@@ -183,6 +183,22 @@ static int s_npads = 1;          /* RECOMP_USB_PADS */
+ static int s_enabled;
+ static int s_trace;
+ 
++/* [ud1] The frame thread and the guest's MMIO writes both read-modify-write
++ * HcInterruptStatus and HcCommandStatus. Atomic, so neither loses the
++ * other's bits. */
++static void reg_or(OhciController *hc, uint32_t off, uint32_t bits)
++{
++    volatile LONG *p = (volatile LONG *)&hc->reg[off / 4];
++    LONG o;
++    do { o = *p; } while (InterlockedCompareExchange(p, o | (LONG)bits, o) != o);
++}
++static void reg_andnot(OhciController *hc, uint32_t off, uint32_t bits)
++{
++    volatile LONG *p = (volatile LONG *)&hc->reg[off / 4];
++    LONG o;
++    do { o = *p; } while (InterlockedCompareExchange(p, o & ~(LONG)bits, o) != o);
++}
++
+ static uint32_t *reg_of(OhciController *hc, uint32_t off)
+ {
+     return (off < OHCI_REG_MAX) ? &hc->reg[off / 4] : NULL;
+@@ -226,6 +242,41 @@ static uint64_t ohci_read(void *dev, uint32_t off, int size)
+     return v;
+ }
+ 
++/* [ud3] event ring, dumped by the crash handler. */
++#define UDR_N 96
++static struct { uint32_t seq, kind, a, b, head, ed, ed0; } s_udr[UDR_N];   /* [ud5] */
++static uint32_t s_udr_ed, s_udr_ed0;
++static volatile LONG s_udr_seq;
++static uint32_t s_udr_hcca;
++static void udr(uint32_t kind, uint32_t a, uint32_t b)
++{
++    LONG q = InterlockedIncrement(&s_udr_seq);
++    uint32_t i = (uint32_t)q % UDR_N, head = 0;
++    if (s_udr_hcca && s_udr_hcca < 0x04000000u)
++        head = *(volatile uint32_t *)((uint8_t *)xbox_GetMemoryOffset()
++                                      + 0x80000000u + s_udr_hcca + 0x84);
++    s_udr[i].kind = kind; s_udr[i].a = a; s_udr[i].b = b; s_udr[i].head = head;
++    s_udr[i].ed = kind == 1 ? s_udr_ed : 0; s_udr[i].ed0 = kind == 1 ? s_udr_ed0 : 0;
++    s_udr[i].seq = (uint32_t)q;
++}
++void xbox_OhciDumpRing(void)
++{
++    static const char *nm[] = { "?", "RET", "PUB", "ACK", "ISR+", "ISR-" };
++    LONG last = s_udr_seq, q;
++    fprintf(stderr, "  [UDR] last %d OHCI events (HCCA %08X), oldest first:\n",
++            UDR_N, s_udr_hcca);
++    for (q = last - UDR_N + 1; q <= last; q++) {
++        uint32_t i;
++        if (q <= 0) continue;
++        i = (uint32_t)q % UDR_N;
++        if (s_udr[i].seq != (uint32_t)q) continue;
++        fprintf(stderr, "  [UDR] %6u %-4s %08X %08X  hcca.done=%08X ed=%08X/%08X\n",
++                s_udr[i].seq, nm[s_udr[i].kind < 6 ? s_udr[i].kind : 0], s_udr[i].a,
++                s_udr[i].b, s_udr[i].head, s_udr[i].ed, s_udr[i].ed0);
++    }
++    fflush(stderr);
++}
++
+ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+ {
+     OhciController *hc = (OhciController *)dev;
+@@ -253,9 +304,9 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+          * a driver polls for exactly that. Leaving it set is a hang, and it
+          * is the first thing a driver does, so it would be the only thing
+          * anyone ever saw of this file. */
+-        *r |= v;
++        reg_or(hc, HcCommandStatus, v);   /* ud1 */
+         if (*r & CS_HCR) {
+-            *r &= ~CS_HCR;
++            reg_andnot(hc, HcCommandStatus, CS_HCR);
+             hc->reg[HcControl / 4] &= ~0xC0u;    /* back to UsbReset state  */
+             hc->reg[HcInterruptStatus / 4] = 0;
+             hc->reg[HcInterruptEnable / 4] = 0;
+@@ -263,6 +314,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+         return;
+ 
+     case HcInterruptStatus:
++        udr(3, v, *r);   /* [ud3] */
+         /* Acknowledging WritebackDoneHead retires the done list.
+          *
+          * The controller publishes the queue in HccaDoneHead and raises WDH;
+@@ -278,7 +330,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+                 wr32(hcca + HCCA_DONE_HEAD, 0);
+             hc->reg[HcDoneHead / 4] = 0;
+         }
+-        *r &= ~v;                       /* write 1 to clear                 */
++        reg_andnot(hc, HcInterruptStatus, v);   /* ud1: atomic; write 1 to clear                 */
+         hc->ack_seq++;
+         return;
+ 
+@@ -349,7 +401,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+             if (*ps & PORT_CCS)
+                 *ps |= PORT_PES;
+             *ps |= PORT_PRSC;
+-            hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
++            reg_or(hc, HcInterruptStatus, INTR_RHSC);   /* ud1 */
+         }
+         return;
+     }
+@@ -509,8 +561,27 @@ static int guest_ok(uint32_t va, uint32_t bytes)
+  * again, forever. */
+ static uint32_t bus_resolve(uint32_t addr)
+ {
+-    if (addr >= g_xbox_image_lo && addr < g_xbox_image_hi)
++    if (addr >= g_xbox_image_lo && addr < g_xbox_image_hi) {
++        if (xbox_ContiguousPageMap()[addr >> 12]) {        /* [ud2] */
++            static volatile LONG n;
++            static uint32_t pages[24];
++            LONG i, k = n;
++            for (i = 0; i < k && i < 24; i++) if (pages[i] == (addr >> 12)) break;
++            if (i == k && k < 24) {
++                k = InterlockedIncrement(&n) - 1;
++                if (k < 24) {
++                    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
++                    pages[k] = addr >> 12;
++                    fprintf(stderr, "  [UD2AMB] %08X: image AND live contiguous page -> image;"
++                            " image=%08X window=%08X\n", addr,
++                            *(uint32_t *)(mem + (addr & ~3u)),
++                            *(uint32_t *)(mem + OHCI_CONTIG_BASE + (addr & ~3u)));
++                    fflush(stderr);
++                }
++            }
++        }
+         return addr;
++    }
+     if (addr && addr < xbox_ContiguousAllocatedBytes())
+         return OHCI_CONTIG_BASE + addr;
+     return addr;
+@@ -703,7 +774,24 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+                 fflush(stderr);
+             }
+         }
++        s_udr_ed = ed; s_udr_ed0 = ed0;   /* [ud5] */
+         if (ed0 & ED_SKIP) { ed = rd32(ed + 12) & ED_PTR_MASK; continue; }
++        if (ed0 & (1u << 15)) {                        /* [ud4] isochronous */
++            static int iso_old = -1, shown;
++            if (iso_old < 0)
++                iso_old = getenv("RECOMP_USB_ISO_OLD") != NULL;
++            if (!iso_old) {
++                if (shown < 4) {
++                    shown++;
++                    fprintf(stderr, "  [OHCI%d] isochronous ED %08X (addr %u ep %u) left "
++                            "pending: no isochronous device\n", hc->index, ed,
++                            ed0 & 0x7Fu, (ed0 >> 7) & 0xFu);
++                    fflush(stderr);
++                }
++                ed = rd32(ed + 12) & ED_PTR_MASK;
++                continue;
++            }
++        }
+         if (head & ED_HEAD_HALT) { ed = rd32(ed + 12) & ED_PTR_MASK; continue; }
+ 
+         while ((head & ED_PTR_MASK) != tail
+@@ -716,6 +804,7 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+              * descriptor on the done queue, newest first. */
+             wr32(td, (rd32(td) & 0x0FFFFFFFu) | (cc << 28));
+             wr32(td + 8, *done_head);
++            udr(1, td, *done_head);   /* [ud3] */
+             *done_head = td;
+             completed++;
+ 
+@@ -737,10 +826,49 @@ static void ohci_publish_done(OhciController *hc, uint32_t done_head)
+ {
+     uint32_t hcca = hc->reg[HcHCCA / 4];
+ 
++    {                                                   /* [ud2] */
++        static int shown;
++        if (shown < 10) {
++            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
++            uint32_t td = done_head, n = 0;
++            shown++;
++            fprintf(stderr, "  [UD2] OHCI%d HCCA %08X (%s) done %08X:", hc->index, hcca,
++                    bus_resolve(hcca) == hcca ? "img" : "win", done_head);
++            while (td && n < 6 && !(td & 0xF) && td < 0x04000000u && guest_ok(td, 16)) {
++                uint32_t r = bus_resolve(td);
++                fprintf(stderr, " td %08X(%s) next img=%08X win=%08X;", td,
++                        r == td ? "img" : "win",
++                        *(uint32_t *)(mem + td + 8),
++                        *(uint32_t *)(mem + OHCI_CONTIG_BASE + td + 8));
++                td = rd32(td + 8);
++                n++;
++            }
++            fprintf(stderr, "\n");
++            fflush(stderr);
++        }
++    }
++
++    {                                                   /* [ud1] */
++        static int bad;
++        uint32_t td = done_head, n = 0;
++        while (td && n < 64) {
++            if ((td & 0xF) || !guest_ok(td, 16)) {
++                if (bad++ < 20)
++                    fprintf(stderr, "  [UD] OHCI%d done chain %08X: link %u = %08X is bad\n",
++                            hc->index, done_head, n, td);
++                break;
++            }
++            td = rd32(td + 8);
++            n++;
++        }
++    }
++
+     if (hcca)
+         wr32(hcca + HCCA_DONE_HEAD, done_head);
++    s_udr_hcca = hcca;   /* [ud3] */
+     hc->reg[HcDoneHead / 4] = done_head;
+-    hc->reg[HcInterruptStatus / 4] |= INTR_WDH;
++    udr(2, done_head, hcca);   /* [ud3] */
++    reg_or(hc, HcInterruptStatus, INTR_WDH);   /* ud1 */
+ }
+ 
+ /* Both runners add to the caller's done queue rather than publishing their
+@@ -924,12 +1052,16 @@ static void ohci_raise(OhciController *hc, uint32_t source)
+     uint32_t enable = hc->reg[HcInterruptEnable / 4];
+     int claimed;
+ 
+-    hc->reg[HcInterruptStatus / 4] |= source;
++    reg_or(hc, HcInterruptStatus, source);   /* ud1 */
+ 
+     if (!(enable & INTR_MIE) || !(enable & source))
+         return;
+ 
++    udr(4, hc->reg[HcInterruptStatus / 4], 0);   /* [ud3] */
++
+     claimed = ohci_call_isr(hc);
++
++    udr(5, (uint32_t)claimed, 0);   /* [ud3] */
+     if (s_trace || claimed >= 0) {
+         static unsigned n;
+         if (n++ < 20) {
+@@ -1071,7 +1203,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+             unsigned port = pspec ? (unsigned)atoi(pspec) : 0u;
+             if (port >= s_ndp) port = s_ndp - 1u;
+             hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
+-            hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
++            reg_or(hc, HcInterruptStatus, INTR_RHSC);   /* ud1 */
+             plugged = 1;
+             s_plugged_pads = 1;
+             first_port = port;
+@@ -1089,7 +1221,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+             if (++settle > 50) {                 /* ~1 s after the last */
+                 unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
+                 hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
+-                hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
++                reg_or(hc, HcInterruptStatus, INTR_RHSC);   /* ud1 */
+                 fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
+                         s_plugged_pads + 1, port + 1, 10);
+                 fflush(stderr);
+@@ -1121,7 +1253,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+              * controller zeroes, so a dword write is what hardware does. */
+             if (hcca)
+                 wr32(hcca + 0x80, hc->reg[HcFmNumber / 4]);
+-            hc->reg[HcInterruptStatus / 4] |= INTR_SF;
++            reg_or(hc, HcInterruptStatus, INTR_SF);   /* ud1 */
+         }
+ 
+         /* Be the bus master. ControlListEnable in HcControl says the driver
+@@ -1163,13 +1295,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+          && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
+             if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
+                               &pass_done))
+-                hc->reg[HcCommandStatus / 4] &= ~0x04u;   /* BLF consumed */
++                reg_andnot(hc, HcCommandStatus, 0x04u);   /* ud1 */   /* BLF consumed */
+         }
+ 
+         if ((control & 0x10u)
+          && guest_ok(hc->reg[HcControlHeadED / 4] & ED_PTR_MASK, 16)) {
+             if (ohci_run_control_list(hc, &pass_done))
+-                hc->reg[HcCommandStatus / 4] &= ~0x02u;   /* CLF consumed */
++                reg_andnot(hc, HcCommandStatus, 0x02u);   /* ud1 */   /* CLF consumed */
+         }
+ 
+         /* One done queue per pass, covering all three lists.

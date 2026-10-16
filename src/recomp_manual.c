@@ -247,17 +247,26 @@ void sub_002444AC(void)
 /* Deathrow bring-up: who hammers sub_001C0BAE (DSOUND, thiscall) and what
  * it returns. Summary every 20M calls. */
 extern void sub_001C0BAE(void);
+extern void sub_001C08EC(void);
 
 /* Deathrow probe (HLE hack): sub_001C1478 waits for the APU to confirm a
  * DirectSound voice stopped (busy bit 0x8000 at this+0x12). No APU confirms,
- * so poll a bounded number of times, then clear the bit ourselves. */
+ * so poll a bounded number of times, then complete the stop ourselves.
+ *
+ * Completing means what the stop notification's DPC does (0x1BFC5B ->
+ * sub_001BF7FE): while the voice's node at +0x4C is still on its owner's
+ * service list, call sub_001C08EC(1) (thiscall, ret 4). That splices the
+ * voice out of the hardware voice list, unlinks the node and clears 0x8000.
+ * Clearing only the bit (as before) left the voice on the service list and
+ * in the hardware list: au22's voice 68 linked to itself, and au23 crashed
+ * in the service loop at 0x1BF71A calling a method of the freed voice. */
 void sub_001C1478(void)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
     uint32_t self = g_ecx;
     uint16_t *flags = (uint16_t *)(mem + self + 0x12);
     static unsigned forced;
-    int i;
+    int i, unlinked = 0;
 
     if (*flags & 1) {
         for (i = 0; i < 1000 && (*flags & 0x8000); i++) {
@@ -267,9 +276,20 @@ void sub_001C1478(void)
             sub_001C0BAE();
         }
         if (*flags & 0x8000) {
-            *flags &= (uint16_t)~0x8000;
+            uint32_t node = self + 0x4C;
+            if (*(uint32_t *)(mem + node) != node) {
+                g_ecx = self;
+                g_esp -= 8;
+                *(uint32_t *)(mem + g_esp + 4) = 1;          /* arg: stopped */
+                *(uint32_t *)(mem + g_esp) = 0x001BF852u;    /* the DPC path's return address */
+                sub_001C08EC();                              /* pops both (ret 4) */
+                unlinked = 1;
+            }
+            if (*flags & 0x8000)
+                *flags &= (uint16_t)~0x8000;
             if (forced++ < 10)
-                fprintf(stderr, "[DSWAIT] forced voice-stop completion on %08X\n", self);
+                fprintf(stderr, "[DSWAIT] forced voice-stop completion on %08X (%s)\n", self,
+                        unlinked ? "unlinked" : "not on a list");
         }
     }
     g_ecx = self;

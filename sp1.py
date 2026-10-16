@@ -1,86 +1,179 @@
 #!/usr/bin/env python3
-"""sp1.py - two executor-thread savings.
+"""sp1.py - sampling profiler for the freeze (diagnostic, Win32). Run from
+deathrow/. Patches ../xboxrecomp/src/kernel/kernel_bridge.c (.pre_sp1).
 
-1. nv2a_pb_scan.c: pb_walk called note() (linear search of the method survey
-   table) for EVERY pushbuffer word. The survey is only reported with
-   RECOMP_PB_SCAN, so note() now runs only then.
-2. nv2a_pb_exec.c: post-transform vertex cache per batch. The vertex program
-   (or FF transform) ran once per index; indexed triangle lists repeat each
-   vertex several times. Cache keyed on the vertex index, reset every batch
-   (an index names one vertex within a batch now that ix1 made indices 32-bit).
-   RECOMP_NO_VCACHE=1 disables it.
-Backups: nv2a_pb_scan.c.pre_sp1, nv2a_pb_exec.c.pre_sp1
+RECOMP_SAMPLE_MS=50 samples every thread's host call chain (4 frames inside
+the exe) every 50 ms and prints the top 12 every 10 s as [SAMPLE] lines.
+Resolve with:  grep -a SAMPLE run.log | python sym_chain.py
 """
-import re, shutil, sys
+import shutil, sys
 
-K = sys.argv[1] if len(sys.argv) > 1 else "../xboxrecomp/src/kernel"
-SCAN, EXEC = K + "/nv2a_pb_scan.c", K + "/nv2a_pb_exec.c"
+P = "../xboxrecomp/src/kernel/kernel_bridge.c"
+raw = open(P, encoding="utf-8", newline="").read()
+crlf = "\r\n" in raw
+s = raw.replace("\r\n", "\n")
+if "[sp1]" in s:
+    sys.exit("already patched")
+fails = 0
 
-def patch(path, edits, tag):
-    src = open(path, encoding="utf-8", newline="").read()
-    if tag in src:
-        print(f"ALREADY APPLIED {path}"); return True
-    nl = "\r\n" if "\r\n" in src else "\n"
-    out, ok = src, True
-    for name, pat, rep in edits:
-        n = len(re.findall(pat, out))
-        if n != 1:
-            print(f"FAIL {name} (matches={n})"); ok = False; continue
-        out = re.sub(pat, lambda m: rep(m, nl), out, count=1)
-        print(f"OK   {name}")
-    if not ok:
-        print(f"nothing written to {path}"); return False
-    shutil.copyfile(path, path + ".pre_sp1")
-    open(path, "w", encoding="utf-8", newline="").write(out)
-    print(f"written {path}; backup .pre_sp1")
-    return True
+def rep(label, old, new):
+    global s, fails
+    if s.count(old) == 1:
+        s = s.replace(old, new); print("OK  ", label)
+    else:
+        fails += 1; print("FAIL", label, s.count(old))
 
-scan_edits = [
-    ("survey flag",
-     r"(?m)^static int s_exec_enabled = -1;",
-     lambda m, nl: m.group(0) + nl + "static int s_scan_on;                  /* [sp1] RECOMP_PB_SCAN */"),
-    ("note() only when surveying",
-     r"(?m)^([ \t]+)note\(subch, m\);",
-     lambda m, nl: m.group(1) + "if (s_scan_on)" + nl + m.group(1) + "    note(subch, m);"),
-    ("set flag in nv2a_pb_scan",
-     r"(?m)^    if \(!\(scan \|\| s_exec_enabled\) \|\| end_va <= start_va\)",
-     lambda m, nl: "    s_scan_on = scan;" + nl + m.group(0)),
-]
+BODY = r'''/* [sp1] where is every thread spending its time? (diagnostic, Win32)
+ * RECOMP_SAMPLE_MS=50: a helper thread suspends each thread of the process
+ * every 50 ms, unwinds its host stack and keeps the first 4 frames inside the
+ * exe. Every 10 s the 12 most frequent (thread, chain) pairs are printed as
+ * [SAMPLE] lines; resolve the rvas with sym.py. Nothing is printed while a
+ * thread is suspended (it may hold the CRT lock). */
+#ifdef _WIN32
+#include <tlhelp32.h>
+typedef struct { DWORD tid; ULONG64 r[4]; unsigned n; } sp1_ent;
+static sp1_ent sp1_h[512];
+static int sp1_hn;
+static unsigned sp1_lost;
 
-VC = r'''    {                                                     /* [sp1] vertex cache */
-        static uint32_t vk[8192], vg[8192], vp[8192], gen;
-        static int on = -1;
-        if (on < 0) {
-            on = getenv("RECOMP_NO_VCACHE") == NULL;
-            fprintf(stderr, "[VC] post-transform vertex cache %s\n", on ? "on" : "off");
+static void sp1_add(DWORD tid, const ULONG64 *r)
+{
+    int i;
+    for (i = 0; i < sp1_hn; i++)
+        if (sp1_h[i].tid == tid && !memcmp(sp1_h[i].r, r, sizeof sp1_h[i].r)) {
+            sp1_h[i].n++;
+            return;
         }
-        if (++gen == 0) {
-            memset(vg, 0, sizeof vg);
-            gen = 1;
-        }
-        for (i = 0; i < n; i++) {
-            uint32_t v = s_gpu.idx[i], h = (v ^ (v >> 13)) & 8191u;
-            if (on && vg[h] == gen && vk[h] == v) {
-                s_xf[i] = s_xf[vp[h]];
+    if (sp1_hn < (int)(sizeof sp1_h / sizeof sp1_h[0])) {
+        sp1_h[sp1_hn].tid = tid;
+        memcpy(sp1_h[sp1_hn].r, r, sizeof sp1_h[0].r);
+        sp1_h[sp1_hn].n = 1;
+        sp1_hn++;
+    } else {
+        sp1_lost++;
+    }
+}
+
+static void sp1_dump(unsigned total)
+{
+    int k, i, best;
+    fprintf(stderr, "[SAMPLE] ---- %u samples, %d distinct, %u not kept ----\n",
+            total, sp1_hn, sp1_lost);
+    for (k = 0; k < 12; k++) {
+        best = -1;
+        for (i = 0; i < sp1_hn; i++)
+            if (sp1_h[i].n && (best < 0 || sp1_h[i].n > sp1_h[best].n))
+                best = i;
+        if (best < 0)
+            break;
+        fprintf(stderr, "[SAMPLE] %5u tid %5lu rip rva 0x%llX <- 0x%llX <- 0x%llX <- 0x%llX\n",
+                sp1_h[best].n, (unsigned long)sp1_h[best].tid,
+                (unsigned long long)sp1_h[best].r[0], (unsigned long long)sp1_h[best].r[1],
+                (unsigned long long)sp1_h[best].r[2], (unsigned long long)sp1_h[best].r[3]);
+        sp1_h[best].n = 0;
+    }
+    fflush(stderr);
+    sp1_hn = 0;
+    sp1_lost = 0;
+}
+
+static DWORD WINAPI sp1_thread(LPVOID arg)
+{
+    DWORD ms = (DWORD)(uintptr_t)arg, self = GetCurrentThreadId();
+    DWORD pid = GetCurrentProcessId();
+    ULONG64 base = (ULONG64)(uintptr_t)GetModuleHandleA(NULL), size;
+    ULONGLONG next = GetTickCount64() + 10000;
+    unsigned total = 0;
+    {
+        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)(uintptr_t)base;
+        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(uintptr_t)(base + dos->e_lfanew);
+        size = nt->OptionalHeader.SizeOfImage;
+    }
+    for (;;) {
+        HANDLE snap;
+        THREADENTRY32 te;
+        BOOL ok;
+        Sleep(ms);
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE)
+            continue;
+        te.dwSize = sizeof te;
+        for (ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            HANDLE t;
+            CONTEXT c;
+            ULONG64 r[4] = {0, 0, 0, 0};
+            int k = 0, d, got = 0;
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
                 continue;
+            t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                           FALSE, te.th32ThreadID);
+            if (!t)
+                continue;
+            if (SuspendThread(t) != (DWORD)-1) {
+                memset(&c, 0, sizeof c);
+                c.ContextFlags = CONTEXT_FULL;
+                if (GetThreadContext(t, &c)) {
+                    got = 1;
+                    for (d = 0; d < 24 && k < 4; d++) {
+                        ULONG64 ip = c.Rip, ib = 0;
+                        PRUNTIME_FUNCTION f;
+                        if (ip >= base && ip < base + size)
+                            r[k++] = ip - base;
+                        f = RtlLookupFunctionEntry(ip, &ib, NULL);
+                        if (!f) {
+                            if (!c.Rsp) break;
+                            c.Rip = *(ULONG64 *)(uintptr_t)c.Rsp;
+                            c.Rsp += 8;
+                        } else {
+                            PVOID hd;
+                            ULONG64 ef;
+                            RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, ip, f, &c, &hd, &ef, NULL);
+                        }
+                        if (!c.Rip)
+                            break;
+                    }
+                }
+                ResumeThread(t);
             }
-            if (!(s_ff_active ? ff_transform_vertex(v, &s_xf[i])
-                              : transform_vertex(v, &s_xf[i])))
-                return;                                /* no program loaded */
-            vk[h] = v; vg[h] = gen; vp[h] = i;
+            CloseHandle(t);
+            if (got && k) {
+                sp1_add(te.th32ThreadID, r);
+                total++;
+            }
+        }
+        CloseHandle(snap);
+        if (GetTickCount64() >= next) {
+            sp1_dump(total);
+            total = 0;
+            next = GetTickCount64() + 10000;
         }
     }
+    return 0;
+}
+
+static void sp1_start(void)
+{
+    const char *e = getenv("RECOMP_SAMPLE_MS");
+    DWORD ms = e && *e ? (DWORD)strtoul(e, NULL, 0) : 0;
+    if (!ms)
+        return;
+    CreateThread(NULL, 0, sp1_thread, (LPVOID)(uintptr_t)ms, 0, NULL);
+    fprintf(stderr, "[SAMPLE] sampling every %lu ms\n", (unsigned long)ms);
+}
+#else
+static void sp1_start(void) {}
+#endif
+
 '''
 
-exec_edits = [
-    ("vertex cache in the transform loop",
-     r"(?m)^    for \(i = 0; i < n; i\+\+\)\r?\n"
-     r"        if \(!\(s_ff_active \? ff_transform_vertex\(s_gpu\.idx\[i\], &s_xf\[i\]\)\r?\n"
-     r"\s+: transform_vertex\(s_gpu\.idx\[i\], &s_xf\[i\]\)\)\)\r?\n"
-     r"            return;[^\r\n]*\r?\n",
-     lambda m, nl: VC.replace("\n", nl)),
-]
+rep("sampler", "void xbox_kernel_bridge_init(void)\n{\n", BODY + "void xbox_kernel_bridge_init(void)\n{\n")
+rep("start it",
+    "    guest_cpu_join();          /* the caller goes on to run the title's entry point */\n",
+    "    guest_cpu_join();          /* the caller goes on to run the title's entry point */\n"
+    "    sp1_start();               /* [sp1] */\n")
 
-a = patch(SCAN, scan_edits, "[sp1]")
-b = patch(EXEC, exec_edits, "[sp1]")
-sys.exit(0 if a and b else 1)
+if fails:
+    sys.exit(f"{fails} edit(s) failed -- nothing written")
+shutil.copyfile(P, P + ".pre_sp1")
+open(P, "w", encoding="utf-8", newline="").write(s.replace("\n", "\r\n") if crlf else s)
+print("version sp1 v1; written; backup " + P + ".pre_sp1")

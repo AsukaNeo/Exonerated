@@ -252,7 +252,52 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             g_ebx, g_esi, g_edi);
         fprintf(stderr, "  Xbox VA of fault: 0x%08X\n",
             (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset));
+        {                                               /* [cr3] for sym.py */
+            uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+            fprintf(stderr, "  image base 0x%llX, rip rva 0x%llX\n",
+                    (unsigned long long)base,
+                    (unsigned long long)(ep->ContextRecord->Rip - base));
+            fflush(stderr);
+        }
         print_guest_context((void *)ep->ContextRecord->Rip);
+        { extern void xbox_OhciDumpRing(void); xbox_OhciDumpRing(); }   /* [ud3] */
+        {                                               /* [ud5] */
+            const uint8_t *m = (const uint8_t *)g_xbox_mem_offset;
+            uint32_t a, i;
+            for (a = 0x80002000u; a < 0x80004000u; a += 32) {
+                fprintf(stderr, "  [XPPMEM] %08X:", a);
+                for (i = 0; i < 8; i++)
+                    fprintf(stderr, " %08X", *(const uint32_t *)(m + a + i * 4));
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr);
+        }
+
+        {                                               /* [cr2] */
+            extern RECOMP_TLS uint32_t g_ebp;
+            const uint8_t *m = (const uint8_t *)g_xbox_mem_offset;
+            uint32_t sp = g_esp, i, ctx = 0x00402BB8u, hcca;
+            fprintf(stderr, "  [GSTK] esp=%08X ebp=%08X", sp, g_ebp);
+            for (i = 0; i < 64; i++) {
+                uint32_t a = sp + i * 4;
+                if (a < 0x10000u || a >= 0x04000000u) break;
+                if (i % 8 == 0) fprintf(stderr, "\n  [GSTK] +%03X:", i * 4);
+                fprintf(stderr, " %08X", *(const uint32_t *)(m + a));
+            }
+            fprintf(stderr, "\n  [XPP] delta[0x5678C0]=%08X ctx %08X:",
+                    *(const uint32_t *)(m + 0x5678C0u), ctx);
+            for (i = 0; i < 32; i++) {
+                if (i % 8 == 0) fprintf(stderr, "\n  [XPP] +%03X:", i * 4);
+                fprintf(stderr, " %08X", *(const uint32_t *)(m + ctx + i * 4));
+            }
+            hcca = *(const uint32_t *)(m + ctx + 8);
+            if (hcca >= 0x10000u && (hcca < 0x04000000u || (hcca >= 0x80000000u && hcca < 0x84000000u)))
+                fprintf(stderr, "\n  [XPP] HCCA %08X +80: %08X %08X %08X %08X",
+                        hcca, *(const uint32_t *)(m + hcca + 0x80), *(const uint32_t *)(m + hcca + 0x84),
+                        *(const uint32_t *)(m + hcca + 0x88), *(const uint32_t *)(m + hcca + 0x8C));
+            fprintf(stderr, "\n");
+            fflush(stderr);
+        }
 
         /*
          * TODO: Add game-specific diagnostics here. Examples:
@@ -266,13 +311,22 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
          *   fprintf(stderr, "  Game state: %u\n", state);
          */
 
-        /* Print native stack return addresses for debugging */
+        /* Print native stack return addresses for debugging. The exe loads
+         * wherever ASLR puts it, so test against the real image range and
+         * print RVAs ("rip rva" so sym.py < log resolves them too). [cr3] */
         {
             uintptr_t *sp = (uintptr_t *)ep->ContextRecord->Rsp;
+            uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+            IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base +
+                                   ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+            uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+            int shown = 0;
             fprintf(stderr, "  Native stack (first 8 return addrs):\n");
-            for (int i = 0; i < 64 && sp[i]; i++) {
-                if (sp[i] >= 0x140000000ULL && sp[i] < 0x150000000ULL) {
-                    fprintf(stderr, "    [%d] 0x%llX\n", i, (unsigned long long)sp[i]);
+            for (int i = 0; i < 256 && shown < 8; i++) {
+                if (sp[i] >= base && sp[i] < end) {
+                    fprintf(stderr, "    [%d] rip rva 0x%llX\n", i,
+                            (unsigned long long)(sp[i] - base));
+                    shown++;
                 }
             }
         }
