@@ -88,7 +88,9 @@ Any XInput controller (Xbox 360 / One / Series, or another pad through Steam Inp
 | `src/recomp_manual.c` | Hand-written overrides for game and system functions |
 | `patches/xboxrecomp-local.patch` | Changes to the xboxrecomp toolkit (rendering, kernel, threading fixes) |
 | `seeds/seed_functions.json` | Function entry points the disassembler misses on its own |
-| `*.py`, `*.sh` | Build, run, profiling and diagnostic scripts |
+| `*.sh` | Build (`regen.sh`) and run (`play.sh`, `run.sh`) scripts |
+| `tools/` | Reusable helpers: symbol lookup, generated-code search, profiling and frame-rate reports |
+| `patches/scripts/` | One-shot scripts that made the toolkit changes, kept as a record |
 
 ## Contributing
 

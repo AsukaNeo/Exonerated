@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sym.py - resolve exe RVAs (e.g. from [WATCH] lines) to functions via the map.
-Run from deathrow/:  py -3 sym.py 0x1234AB [0x...]   or   py -3 sym.py < au4.log
+Run from deathrow/:  py -3 tools/sym.py 0x1234AB [0x...]   or   py -3 tools/sym.py < au4.log
 """
 import bisect, re, sys
 
