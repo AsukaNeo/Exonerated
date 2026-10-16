@@ -44,7 +44,7 @@
 
 ## Building
 
-1. Clone [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) v0.13.1 next to this repository and apply the toolkit changes:
+1. Clone [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) v0.14.0 next to this repository and apply the toolkit changes:
 ```bash
    git -C ../xboxrecomp apply ../Exonerated/patches/xboxrecomp-local.patch
 ```

@@ -190,8 +190,10 @@ void recomp_icall_not_code_log(uint32_t va)
  * cause rather than wherever the damage surfaces. */
 #include <stdlib.h>
 
+int xbox_gdlock_insn(const char *text, uint32_t va);   /* gd1 */
 void recomp_unimpl(const char *text, uint32_t va)
 {
+    if (xbox_gdlock_insn(text, va)) return;   /* gd1: cli/sti */
     static int printed;
     const char *trap = getenv("RECOMP_UNIMPL_TRAP");
     int stop = trap && *trap && *trap != '0';

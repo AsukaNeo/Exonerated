@@ -70,6 +70,7 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
 extern RECOMP_TLS double g_fp_stack[8];
 extern RECOMP_TLS int g_fp_top;
 extern RECOMP_TLS uint16_t g_fp_control_word;
+extern RECOMP_TLS uint32_t g_mxcsr;
 extern RECOMP_TLS int g_fp_cmp;
 extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
 extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
@@ -217,14 +218,6 @@ static void print_guest_context(void *rip)
 typedef struct MCPXAPUState MCPXAPUState;
 extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
 extern MCPXAPUState *g_apu_state;
-extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
-                                 uint32_t fault_xbox_va, int is_write);
-
-/* The trapped span, matching what MemoryLayoutInit unmaps: the APU's own
- * 512 KB, not the whole MCPX aperture. AC'97 above it stays plain memory,
- * which is what the codec-ready bit needs. */
-#define APU_TRAP_BASE 0xFE800000u
-#define APU_TRAP_END  0xFE880000u
 
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
@@ -242,36 +235,12 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        /* APU registers -> the emulated APU.
-         *
-         * The other half of RECOMP_AC97_READY: reporting the codec ready is
-         * what lets DirectSoundCreate past its first gate, and from there it
-         * drives the APU directly, so the registers have to fault to be seen.
-         * "Handled" means the access was decoded and the instruction stepped
-         * over, so execution resumes instead of unwinding. */
-        {
-            /* USB host controllers -> the OHCI model (RECOMP_USB). */
-        {
-            extern int xbox_OhciOwnsAddress(uint32_t xbox_va);
-            extern int xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
-            uint32_t usb_va =
-                (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
-
-            if (xbox_OhciOwnsAddress(usb_va)
-                    && xbox_OhciHandleMmio(ep->ContextRecord, usb_va))
-                return EXCEPTION_CONTINUE_EXECUTION;
-        }
-			uint32_t xbox_va =
-                (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
-
-            if (xbox_va >= APU_TRAP_BASE && xbox_va < APU_TRAP_END
-                    && apu_hook_handle_mmio(
-                           ep->ContextRecord, fault_addr, xbox_va,
-                           ep->ExceptionRecord->ExceptionInformation[0]
-                               ? 1 : 0)) {
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-        }
+        /* Trapped hardware registers (APU, USB OHCI) -> their models,
+         * through the toolkit's dispatcher (v0.14). "Handled" means the
+         * access was decoded and the instruction stepped over, so
+         * execution resumes instead of unwinding. */
+        if (xbox_VehMmioFault(ep))
+            return EXCEPTION_CONTINUE_EXECUTION;
 
         fprintf(stderr, "[CRASH] Access violation at RIP=0x%llX, fault addr=0x%llX (%s)\n",
             (unsigned long long)ep->ContextRecord->Rip,
