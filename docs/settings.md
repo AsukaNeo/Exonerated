@@ -1,0 +1,56 @@
+# Settings and controls
+
+## Settings overlay
+
+Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`.
+
+Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The game keeps running underneath, but it ignores your inputs while the overlay is open.
+
+## Window keys
+
+| Key | Action |
+|---|---|
+| F10, or Back+Start on the pad | Settings overlay |
+| Alt+Enter or F11 | Borderless fullscreen |
+| F12 | Screenshot to `screenshots/` |
+
+## `exonerated.ini`
+
+Read from the folder you run from, or beside the exe. An environment variable of the same meaning overrides the file, and the run log's `[FBWIN] settings` line shows what was used.
+
+```ini
+[display]
+vsync=1            ; RECOMP_VSYNC: 0 to turn it off
+filter=sharp       ; RECOMP_FILTER: sharp (crisp at any size), bilinear, nearest
+scale=fit          ; RECOMP_SCALE: fit (4:3 with black bars), integer, stretch
+fullscreen=0       ; RECOMP_FULLSCREEN: 1 to start fullscreen
+window_scale=2     ; RECOMP_WINDOW_SCALE: starting window size, times 640×480
+present=d3d11      ; RECOMP_PRESENT: gdi for the plain fallback
+fps_counter=0      ; RECOMP_FPS_COUNTER: 1 for the on-screen FPS counter
+
+[input]
+rumble=1           ; RECOMP_RUMBLE: 0 to turn it off
+deadzone=0         ; RECOMP_PAD_DEADZONE: extra stick dead zone, 0-32000
+```
+
+## Controller
+
+Any XInput controller works: Xbox 360, One or Series, or another pad through Steam Input or DS4Windows. It plays as player 1 and can be plugged in or swapped while the game runs. The keyboard works alongside it.
+
+| PC pad | Xbox | Keyboard |
+|---|---|---|
+| A B X Y | A B X Y | Z X C V |
+| LB / RB | White / Black | Q / E |
+| LT / RT | Left / right trigger | 1 / 3 |
+| Left stick | Left stick | W A S D |
+| Right stick | Right stick | I J K L |
+| D-pad | D-pad | Arrow keys |
+| Start / Back | Start / Back | Enter / Backspace |
+| LS / RS click | Left / right thumb | Shift / Ctrl |
+
+- In Deathrow the right stick strafes. LT is a modifier held with a face button (LT+B slide tackle, LT+A dive), and RT swings the camera to the objective.
+- A B X Y, Black and White are pressure-sensitive on the Xbox; a PC pad sends them fully pressed.
+- The game applies its own stick dead zone. If a stick still drifts, raise `deadzone`.
+- Rumble buzzes on hits and tackles.
+
+How the controller is wired up underneath (USB ports, the input bridge, logs) is in [developers.md](developers.md#controller-internals).
