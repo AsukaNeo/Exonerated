@@ -36,7 +36,7 @@
 - ✅ Controller as player 1, with rumble; aiming dots are drawn
 - 🚧 Software rendering runs at roughly 20–60 fps in a match; a GPU renderer is planned
 - 🚧 Some overlapping textures; the pre-match loading screen's backdrop is sometimes striped
-- ⛔ No prebuilt download: `build.bat` builds it from your own copy of the game, so no game code is ever distributed
+- ⛔ No prebuilt download yet: `build.bat` builds it from your own copy of the game. A future download will hold only the program and still need your own copy (see [Release builds](#release-builds))
 - ⛔ Network features (Xbox Live, System Link) are not planned and will not be implemented; play is local only
 
 ## What you need
@@ -63,6 +63,10 @@ Keyboard: Enter = Start, Z = A, X = B, arrow keys to move. The intro movies play
 - "not the supported Deathrow release": only the North American disc (version 3) works, because the recompilation is tied to that exact program.
 - The build's full output is in `build.log`; the lines with `error` are printed when it fails.
 - Starting over: delete `build` and `src\recomp\gen`, then run `build.bat relift`.
+
+### Release builds
+
+A prebuilt download, when there is one, contains only the program: no game code, data or assets. It does nothing without your own copy of the game. Put `default.xbe` and the `data` folder from your North American disc (version 3) in a folder named `game` next to the program; unpack a disc image first, for example with [extract-xiso](https://github.com/XboxDev/extract-xiso). At every start the program checks that `default.xbe` is the supported release (the same SHA-1 `build.bat` checks) and refuses to run on anything else.
 
 ### For developers
 

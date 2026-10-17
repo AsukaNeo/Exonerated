@@ -52,6 +52,7 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 # Core game sources
 set(GAME_SOURCES
     src/main.c
+    src/game_check.c
     src/recomp_manual.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
@@ -86,6 +87,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxguid
     xinput
     winmm
+    # SHA-1 of default.xbe for the game check (src/game_check.c).
+    bcrypt
     # Lets the fault handler resolve the host RIP back to the generated
     # function's symbol, i.e. to the guest function that faulted.
     dbghelp

@@ -40,6 +40,7 @@
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
+#include "game_check.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -463,8 +464,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dr_default_env();
     if (!dr_find_game_dir()) {
         MessageBoxA(NULL, "Could not find the game files.\n\n"
-                    "Put Deathrow's files (default.xbe and its data folder) in the "
-                    "'game' folder (see build.bat), or set RECOMP_GAME_DIR.",
+                    "Exonerated needs your own copy of Deathrow (original Xbox, "
+                    "North American release). Put its files (default.xbe and its "
+                    "data folder) in a folder named 'game' next to this program, "
+                    "or set RECOMP_GAME_DIR.",
                     "Exonerated", MB_ICONERROR);
         return 1;
     }
@@ -475,6 +478,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
     printf("XBE loaded: %zu bytes\n", xbe_size);
+    {
+        char found[41], msg[768];
+        if (!dr_game_check(xbe_data, xbe_size, found)) {
+            snprintf(msg, sizeof msg,
+                     "This is not the supported Deathrow release.\n\n"
+                     "Exonerated runs only on your own copy of Deathrow for the "
+                     "original Xbox, North American release (title 55530004, "
+                     "version 3). No game files are included with it.\n\n"
+                     "Found:    %s\nExpected: %s\n\nGame folder: %s",
+                     found[0] ? found : "(could not be read)", DR_XBE_SHA1, s_game_dir);
+            MessageBoxA(NULL, msg, "Exonerated", MB_ICONERROR);
+            free(xbe_data);
+            return 1;
+        }
+    }
 
     /* Step 2: Initialize Xbox memory layout */
     printf("Initializing Xbox memory layout...\n");
