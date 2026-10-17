@@ -67,8 +67,11 @@ The game window scales the 640×480 picture to any size and can go borderless fu
 
 | Key | Action |
 |---|---|
+| F10, or Back+Start on the pad | Open or close the settings overlay |
 | Alt+Enter or F11 | Toggle borderless fullscreen |
 | F12 | Save a screenshot to `screenshots/` |
+
+The settings overlay changes fullscreen, vsync, filter, scale, an on-screen FPS counter, rumble and the stick dead zone while you play. It can also take a screenshot and **Save settings** to `exonerated.ini`. Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The game keeps running underneath, but it doesn't see your inputs while the overlay is open.
 
 Settings go in `exonerated.ini`, in the folder you run from (or beside the exe); an environment variable of the same meaning overrides the file:
 
@@ -80,6 +83,11 @@ scale=fit          ; RECOMP_SCALE: fit (4:3 with black bars), integer, stretch
 fullscreen=0       ; RECOMP_FULLSCREEN: 1 to start fullscreen
 window_scale=2     ; RECOMP_WINDOW_SCALE: starting window size, times 640×480
 present=d3d11      ; RECOMP_PRESENT: gdi for the plain fallback
+fps_counter=0      ; RECOMP_FPS_COUNTER: 1 for the on-screen FPS counter
+
+[input]
+rumble=1           ; RECOMP_RUMBLE: 0 to turn it off
+deadzone=0         ; RECOMP_PAD_DEADZONE: extra stick dead zone, 0-32000
 ```
 
 The run log's `[FBWIN] settings` line shows what was picked up.
