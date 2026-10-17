@@ -60,7 +60,10 @@ Everything else, including the full key map, `exonerated.ini` and the controller
 - **[xboxrecomp](https://github.com/sp00nznet/xboxrecomp)** by sp00nz and contributors, the base this project is built on
 - **[xemu](https://github.com/xemu-project/xemu)**, the reference for Xbox hardware behaviour (see [NOTICE](NOTICE))
 - A professional coder's input throughout
-- Built with the help of **Claude Opus 5.5**: an AI-assisted project; view it as you see fit in that light
+
+## AI assistance
+
+AI (**Claude Opus 5.5**) was used as a development assistant for the intensely time-consuming recompilation work, to make this project a reality sooner. Human-made decompilation projects are the gold standard. View the use of AI in this project in whatever way feels most appropriate to you.
 
 ## Legal
 
