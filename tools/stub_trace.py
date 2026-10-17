@@ -1,5 +1,5 @@
-import re
-p=r'F:\recomp\Deathrow\deathrow\src\recomp\gen\recomp_stubs_unresolved.c'
+import os, re
+p=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'recomp', 'gen', 'recomp_stubs_unresolved.c')
 s=open(p,'rb').read().decode('utf-8','surrogateescape')
 if '[STUB]' in s: print('stub_trace: already patched'); raise SystemExit
 r=re.compile(r'(void\s+(sub_[0-9A-Fa-f]+)\s*\(void\)\s*\{)')

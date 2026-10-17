@@ -83,8 +83,77 @@ extern ptrdiff_t g_xbox_mem_offset;
  * Run: py -3 -m tools.xbe_parser game/default.xbe
  */
 #define YOUR_GAME_ENTRY_POINT   0x0018E88A
-#define YOUR_GAME_XBE_PATH      "F:\\recomp\\Deathrow\\xboxrecomp\\game_files\\default.xbe"
-#define YOUR_GAME_DIR           "F:\\recomp\\Deathrow\\xboxrecomp\\game_files"
+
+/* Where the game's files (default.xbe and its data folder) are, found at
+ * start-up rather than fixed at build time, so a build runs wherever it is
+ * unpacked. The first of these that holds default.xbe wins:
+ *   RECOMP_GAME_DIR          set by hand
+ *   <exe folder>\game        a packaged build
+ *   <exe folder>\..\..\game  build\Release\ in a checkout (build.bat)
+ *   DR_FALLBACK_GAME_DIR     the toolkit's game_files, from CMake */
+#ifndef DR_FALLBACK_GAME_DIR
+#define DR_FALLBACK_GAME_DIR "..\\xboxrecomp\\game_files"
+#endif
+static char s_game_dir[MAX_PATH];
+static char s_game_xbe[MAX_PATH];
+#define YOUR_GAME_DIR           s_game_dir
+#define YOUR_GAME_XBE_PATH      s_game_xbe
+
+static int dr_try_game_dir(const char *dir)
+{
+    char xbe[MAX_PATH];
+    if (!dir || !*dir)
+        return 0;
+    snprintf(xbe, sizeof xbe, "%s\\default.xbe", dir);
+    if (GetFileAttributesA(xbe) == INVALID_FILE_ATTRIBUTES)
+        return 0;
+    if (!GetFullPathNameA(dir, MAX_PATH, s_game_dir, NULL))
+        snprintf(s_game_dir, sizeof s_game_dir, "%s", dir);
+    snprintf(s_game_xbe, sizeof s_game_xbe, "%s\\default.xbe", s_game_dir);
+    return 1;
+}
+
+static int dr_find_game_dir(void)
+{
+    char exe[MAX_PATH], cand[MAX_PATH], *slash;
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if ((slash = strrchr(exe, '\\')) != NULL)
+        *slash = 0;
+    if (dr_try_game_dir(getenv("RECOMP_GAME_DIR")))
+        return 1;
+    snprintf(cand, sizeof cand, "%s\\game", exe);
+    if (dr_try_game_dir(cand))
+        return 1;
+    snprintf(cand, sizeof cand, "%s\\..\\..\\game", exe);
+    if (dr_try_game_dir(cand))
+        return 1;
+    return dr_try_game_dir(DR_FALLBACK_GAME_DIR);
+}
+
+/* The switches a playable run needs, which play.sh used to supply. Set
+ * here so the exe works when started any other way; a variable already in
+ * the environment wins, so play.sh, run.sh and RECOMP_X=0 still decide. */
+static void dr_default_env(void)
+{
+    static const char *const defaults[][2] = {
+        { "RECOMP_GDLOCK",          "1" },   /* ISR/DPC vs raised IRQL */
+        { "RECOMP_VBLANK",          "1" },   /* the intro waits on vblank */
+        { "RECOMP_AC97_READY",      "1" },   /* APU: audio, voice stops */
+        { "RECOMP_HEAP_RECLAIM",    "1" },
+        { "RECOMP_USB",             "1" },
+        { "RECOMP_USB_PADS",        "1" },
+        { "RECOMP_USB_NDP",         "4" },   /* pad on the player 1 port */
+        { "RECOMP_USB_PORT",        "2" },
+        { "RECOMP_KEYBOARD",        "1" },
+        { "RECOMP_PB_EXEC",         "1" },   /* the NV2A executor draws */
+        { "RECOMP_FB_WINDOW",       "1" },
+        { "RECOMP_PRESENT_ON_CLEAR","1" },
+    };
+    size_t i;
+    for (i = 0; i < sizeof defaults / sizeof defaults[0]; i++)
+        if (!getenv(defaults[i][0]))
+            _putenv_s(defaults[i][0], defaults[i][1]);
+}
 
 /* ── Forward declarations ──────────────────────────────────── */
 
@@ -391,10 +460,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     AddVectoredExceptionHandler(1, veh_handler);
 
     /* Step 1: Load XBE */
+    dr_default_env();
+    if (!dr_find_game_dir()) {
+        MessageBoxA(NULL, "Could not find the game files.\n\n"
+                    "Put Deathrow's files (default.xbe and its data folder) in the "
+                    "'game' folder (see build.bat), or set RECOMP_GAME_DIR.",
+                    "Exonerated", MB_ICONERROR);
+        return 1;
+    }
+    fprintf(stderr, "[BOOT] game files: %s\n", s_game_dir);
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
-        MessageBoxA(NULL, "Failed to load default.xbe.\n"
-                    "Place the game files in the 'game' subdirectory.",
-                    "Recomp", MB_ICONERROR);
+        MessageBoxA(NULL, "Failed to load default.xbe from the game folder.",
+                    "Exonerated", MB_ICONERROR);
         return 1;
     }
     printf("XBE loaded: %zu bytes\n", xbe_size);

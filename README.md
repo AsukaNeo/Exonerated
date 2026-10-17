@@ -32,34 +32,41 @@
 - ✅ Boots to the menus and plays a full match end to end: team select, kickoff, replays, back to the main menu
 - ✅ Keyboard and controller input; match clock timing is correct
 - ✅ Fixed-function geometry is rendered (player models are complete)
-- 🚧 Software rendering runs at roughly 8–9 fps in a match; speed is the main work in progress
-- 🚧 Texture artifacts on some player uniforms
-- 🚧 Fixed-function lighting, audio and in-game video are incomplete
-- ⛔ No release executable yet: building from source only
+- ✅ Audio: music and effects play in real time, without dropouts
+- ✅ Controller as player 1, with rumble; aiming dots are drawn
+- 🚧 Software rendering runs at roughly 20–60 fps in a match; a GPU renderer is planned
+- 🚧 Some overlapping textures; the pre-match loading screen's backdrop is sometimes striped
+- ⛔ No prebuilt download: `build.bat` builds it from your own copy of the game, so no game code is ever distributed
 - ⛔ Network features (Xbox Live, System Link) are not planned and will not be implemented; play is local only
 
 ## What you need
 
-- Your own copy of *Deathrow* for the original Xbox. **No game code, data or assets are included in this repository.**
-- Windows with Visual Studio 2022 Build Tools (MSVC), CMake, Python 3 and Git Bash.
+- Your own copy of *Deathrow* for the original Xbox, **North American release** (title 55530004, version 3): its disc image (`.iso`) or the files from it (`default.xbe` and the `data` folder). **No game code, data or assets are included in this repository.**
+- Windows 10 or 11, 64-bit.
+- Free tools, installed once:
+  - [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022), with **Desktop development with C++** ticked (it includes CMake)
+  - [Python 3.8 or newer](https://www.python.org/downloads/); tick **Add python.exe to PATH** in its installer
+  - [Git for Windows](https://git-scm.com/download/win)
 
-## Building
+## Build it yourself
 
-1. Clone [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) v0.14.0 next to this repository and apply the toolkit changes:
-```bash
-   git -C ../xboxrecomp apply ../Exonerated/patches/xboxrecomp-local.patch
-```
-2. Put your own game files in `../xboxrecomp/game_files/` and copy `seeds/seed_functions.json` there.
-3. Lift the game code to C (generated locally, never committed), then build:
-```bash
-   ./regen.sh <log>
-   cmake --build build --config Release
-```
-4. Play:
-```bash
-   ./play.sh run1
-```
-   Keyboard: Enter = Start, Z = A, X = B, arrow keys to move. The intro movies play in a window of their own. `DR_NO_FMV=1` skips that window, but the game can then stall at a black screen after the intro, so leave it off for play.
+1. Download this repository (green **Code** button → **Download ZIP**, then unzip it, or `git clone` it).
+2. Make a folder called `game` inside it and put your game there: the `.iso`, or `default.xbe` with the `data` folder.
+3. Double-click **`build.bat`**. It checks the tools, downloads the [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) toolkit (v0.14.0) next to this folder and applies this project's patch to it, unpacks the `.iso` if you gave one, makes sure it is the supported release, turns the game's code into C, and compiles it. The first run takes a while; later runs only rebuild what changed.
+4. Double-click **`Play Exonerated.bat`**. The run's log goes to `exonerated.log`.
+
+Keyboard: Enter = Start, Z = A, X = B, arrow keys to move. The intro movies play in a window of their own.
+
+### If something goes wrong
+
+- `build.bat` stops with a message saying what is missing and where to get it. Install that, then run it again.
+- "not the supported Deathrow release": only the North American disc (version 3) works, because the recompilation is tied to that exact program.
+- The build's full output is in `build.log`; the lines with `error` are printed when it fails.
+- Starting over: delete `build` and `src\recomp\gen`, then run `build.bat relift`.
+
+### For developers
+
+`regen.sh <log>` re-lifts with seeds found in a run's log, `play.sh <log>` runs with a log name of your choosing, and `run.sh` runs scripted tests. The game files can also live in `../xboxrecomp/game_files/` (the toolkit's folder) or anywhere named by `RECOMP_GAME_DIR`. The settings a run needs (`RECOMP_AC97_READY`, `RECOMP_VBLANK`, `RECOMP_GDLOCK` and others) are on by default in the program itself; set any of them to `0` to turn it off. `DR_NO_FMV=1` skips the movie window, but the game can then stall at a black screen after the intro.
 
 ### Display
 

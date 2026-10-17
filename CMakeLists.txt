@@ -124,3 +124,10 @@ target_link_options(deathrow_recomp PRIVATE /MAP)
 # The window's title prefix and its settings file (exonerated.ini), see
 # xboxrecomp/src/video/fb_present.c.
 target_compile_definitions(xbox_video PRIVATE RECOMP_APP_NAME="Exonerated")
+
+# Last place main.c looks for the game files (after RECOMP_GAME_DIR and the
+# assets folders): the toolkit's game_files, where regen.sh reads the XBE.
+file(TO_NATIVE_PATH "${XBOXRECOMP_DIR}/game_files" DR_FALLBACK_GAME_DIR_NATIVE)
+string(REPLACE "\\" "\\\\" DR_FALLBACK_GAME_DIR_C "${DR_FALLBACK_GAME_DIR_NATIVE}")
+target_compile_definitions(deathrow_recomp PRIVATE
+    DR_FALLBACK_GAME_DIR="${DR_FALLBACK_GAME_DIR_C}")

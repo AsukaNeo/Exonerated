@@ -26,3 +26,12 @@ build/
 !assets/*.png
 # F12 captures from the game window (game-derived)
 screenshots/
+
+# build.bat: your game files (game/), its logs, and the launcher it writes
+game/
+build.log
+build-configure.log
+Play Exonerated.bat
+exonerated.log
+# your settings, written by the settings overlay (F10)
+exonerated.ini
