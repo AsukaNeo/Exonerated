@@ -1557,7 +1557,7 @@ index 37c3621..69b424e 100644
      {
          WCHAR remainder_wide[MAX_PATH];
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 1280565..5131200 100644
+index 1280565..4f59051 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -355,6 +355,8 @@ static struct {
@@ -2369,10 +2369,89 @@ index 1280565..5131200 100644
      in[0] = a; in[1] = b; in[2] = c;
      for (i = 0; i < 3; i++) {
          const Nv2aVshOutput *p = in[i], *q = in[(i + 1) % 3];
-@@ -2662,10 +3217,178 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+@@ -2662,10 +3217,257 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
          raster_xf_triangle(&poly[0], &poly[i], &poly[i + 1]);
  }
  
++/* [gx11] Full-screen draws whose texture is re-hashed at later flips. */
++typedef struct { uint32_t off, bytes, flip0, w, h, fmt; uint64_t hash; ULONGLONG t0; int id; } GxWatch;
++static GxWatch s_gx_watch[64];
++static int s_gx_nwatch, s_gx_watch_ids;
++static uint32_t s_gx_flips;
++
++static uint64_t gx_hash(uint32_t off, uint32_t bytes)
++{
++    const uint8_t *p = (const uint8_t *)xbox_GetMemoryOffset() + off;
++    uint64_t h = 1469598103934665603ull;
++    uint32_t i;
++    for (i = 0; i < bytes; i++)
++        h = (h ^ p[i]) * 1099511628211ull;
++    return h;
++}
++
++static void gx_watch_draw(float w, float h)
++{
++    const Texture *t = &s_gpu.texs[0];
++    GxWatch *g;
++    int k;
++    if (!t->valid || !tex_size_from_format(t->color) || s_gx_nwatch >= 64)
++        return;
++    if (w < 0.9f * (float)s_gpu.clip_w || h < 0.9f * (float)s_gpu.clip_h)
++        return;
++    for (k = 0; k < s_gx_nwatch; k++)
++        if (s_gx_watch[k].off == t->offset && s_gx_flips - s_gx_watch[k].flip0 <= 30)
++            return;                          /* already watching this one */
++    g = &s_gx_watch[s_gx_nwatch++];
++    g->off = t->offset; g->bytes = tex_face_stride(t);
++    g->w = t->width; g->h = t->height; g->fmt = t->color;
++    g->flip0 = s_gx_flips; g->t0 = GetTickCount64(); g->id = ++s_gx_watch_ids;
++    g->hash = gx_hash(g->off, g->bytes);
++    dump_texture_bmp(1000u + (uint32_t)g->id);              /* [gx12] */
++    fprintf(stderr, "[GPU-WATCH] draw #%d tex %08X %ux%u fmt %02X bytes %u hash %016llX "
++            "flip %u t=%llu surf %08X\n", g->id, g->off, g->w, g->h, g->fmt, g->bytes,
++            (unsigned long long)g->hash, g->flip0, (unsigned long long)g->t0,
++            s_gpu.color_offset);
++}
++
++/* [gx13] Depth work since the last flip. */
++static struct {
++    uint32_t clears, zclears, zclear_zeta, zbatches, zeta, color;
++    uint32_t rx0, ry0, rx1, ry1;
++    uint64_t pix0, fail0;
++} s_gz;
++
++static void gx_depth_flip(uint32_t flip)
++{
++    uint64_t pix = s_gpu.xf_pixels - s_gz.pix0, fail = s_gpu.xf_depth_fail - s_gz.fail0;
++    if (s_gz.zbatches || s_gz.zclears)
++        fprintf(stderr, "[GPU-Z] flip %u: clears %u zclears %u (zeta %08X rect %u,%u-%u,%u) "
++                "| zbatches %u zeta %08X colour %08X | pixels %llu depth-failed %llu\n",
++                flip, s_gz.clears, s_gz.zclears, s_gz.zclear_zeta,
++                s_gz.rx0, s_gz.ry0, s_gz.rx1, s_gz.ry1,
++                s_gz.zbatches, s_gz.zeta, s_gz.color,
++                (unsigned long long)pix, (unsigned long long)fail);
++    memset(&s_gz, 0, sizeof s_gz);
++    s_gz.pix0 = s_gpu.xf_pixels;
++    s_gz.fail0 = s_gpu.xf_depth_fail;
++}
++
++static void gx_watch_flip(void)
++{
++    int k;
++    gx_depth_flip(s_gx_flips);                            /* [gx13] */
++    s_gx_flips++;
++    for (k = 0; k < s_gx_nwatch; k++) {
++        GxWatch *g = &s_gx_watch[k];
++        uint32_t d = s_gx_flips - g->flip0;
++        if (d == 1 || d == 2 || d == 5 || d == 30) {
++            uint64_t h = gx_hash(g->off, g->bytes);
++            fprintf(stderr, "[GPU-WATCH] #%d +%u flips (t+%llu ms): %s (hash %016llX)\n",
++                    g->id, d, (unsigned long long)(GetTickCount64() - g->t0),
++                    h == g->hash ? "same" : "CHANGED", (unsigned long long)h);
++        }
++    }
++}
++
 +/* [gx8] One line per batch while s_gx_log_left lasts. lo/hi: the batch's
 + * screen extent, NULL on the screen-space path. */
 +static void gx_log_batch(const char *path, const float *lo, const float *hi)
@@ -2548,7 +2627,7 @@ index 1280565..5131200 100644
  /* Does this batch run the title's vertex program? RECOMP_NO_VSH turns the
   * interpreter off (the batch then falls to the screen-space heuristics). */
  static int batch_uses_program(void)
-@@ -2721,15 +3444,42 @@ static void xf_set_viewport(void)
+@@ -2721,15 +3523,42 @@ static void xf_set_viewport(void)
      s_xf_o[2] = of[2];
  }
  
@@ -2594,7 +2673,7 @@ index 1280565..5131200 100644
      xf_set_viewport();
      {
          const VertexAttr *tc = texcoord_attr();
-@@ -2827,6 +3577,58 @@ static void raster_batch_program(void)
+@@ -2827,6 +3656,93 @@ static void raster_batch_program(void)
      }
      if (s_gpu.texs[0].valid)
          note_texture_use();
@@ -2611,6 +2690,41 @@ index 1280565..5131200 100644
 +                if (s_xf[j].pos[c] < lo[c]) lo[c] = s_xf[j].pos[c];
 +                if (s_xf[j].pos[c] > hi[c]) hi[c] = s_xf[j].pos[c];
 +            }
++        }
++        gx_watch_draw(hi[0] - lo[0], hi[1] - lo[1]);       /* [gx11] */
++        {                                                  /* [gx14] */
++            static int ntall;
++            float bw = hi[0] - lo[0], bh = hi[1] - lo[1];
++            if (ntall < 24 && s_gpu.clip_h && bh > 0.8f * (float)s_gpu.clip_h
++                && bw < 0.08f * (float)s_gpu.clip_w) {
++                uint32_t q;
++                ntall++;
++                fprintf(stderr, "[GPU-TALL] #%d %s prim %u n %u tex %08X %ux%u | x %.0f..%.0f y %.0f..%.0f\n",
++                        ntall, s_ff_active ? "ff" : "program", (unsigned)s_gpu.prim, (unsigned)n,
++                        s_gpu.texs[0].valid ? s_gpu.texs[0].offset : 0,
++                        s_gpu.texs[0].width, s_gpu.texs[0].height, lo[0], hi[0], lo[1], hi[1]);
++                fprintf(stderr, "[GPU-TALL]   depth test %u func %X mask %u clear %.9g zfmt %u"
++                        " | blend %u %X/%X | stages %05X | wrap %u/%u filter %08X\n",
++                        s_gpu.depth_test, s_gpu.depth_func, s_gpu.depth_mask, zclear_value(),
++                        (s_gpu.format >> 4) & 0xF, s_gpu.blend_enable, s_gpu.blend_sfactor,
++                        s_gpu.blend_dfactor, s_gpu.rc.stage_program,
++                        s_gpu.texs[0].addr_u, s_gpu.texs[0].addr_v, s_gpu.texs[0].filter);
++                for (q = 0; q < n && q < 4; q++) {
++                    float in[4] = { 0, 0, 0, 0 };
++                    fetch_attr(&s_gpu.attr[0], s_gpu.idx[q], in);
++                    fprintf(stderr, "[GPU-TALL]   v%u out %.2f %.2f z %.9g w %.5g | in %.4g %.4g %.4g %.4g"
++                            " | t0 %.4g %.4g %.4g %.4g t1 %.4g %.4g\n",
++                            q, s_xf[q].pos[0], s_xf[q].pos[1], s_xf[q].pos[2], s_xf[q].pos[3],
++                            in[0], in[1], in[2], in[3],
++                            s_xf[q].tex[0][0], s_xf[q].tex[0][1], s_xf[q].tex[0][2], s_xf[q].tex[0][3],
++                            s_xf[q].tex[1][0], s_xf[q].tex[1][1]);
++                }
++            }
++        }
++        if (s_gpu.depth_test) {                            /* [gx13] */
++            s_gz.zbatches++;
++            s_gz.zeta = s_gpu.zeta_offset;
++            s_gz.color = s_gpu.color_offset;
 +        }
 +        if (nseen < 400 && (hi[0] - lo[0] > 200.0f || hi[1] - lo[1] > 200.0f)) {
 +            key[0] = s_gpu.texs[0].valid ? s_gpu.texs[0].offset : 0;
@@ -2653,7 +2767,7 @@ index 1280565..5131200 100644
  
      switch (s_gpu.prim) {
      case NV_PRIM_TRIANGLES:
-@@ -2854,6 +3656,26 @@ static void raster_batch_program(void)
+@@ -2854,6 +3770,26 @@ static void raster_batch_program(void)
              raster_xf_clipped(&s_xf[i], &s_xf[i+3], &s_xf[i+2]);
          }
          break;
@@ -2680,7 +2794,7 @@ index 1280565..5131200 100644
      default:
          break;
      }
-@@ -2861,20 +3683,143 @@ static void raster_batch_program(void)
+@@ -2861,20 +3797,143 @@ static void raster_batch_program(void)
          backend_flush(!s_xf_no_tex);
  }
  
@@ -2829,7 +2943,7 @@ index 1280565..5131200 100644
          return;
      }
  
-@@ -2893,6 +3838,7 @@ static void raster_batch(void)
+@@ -2893,6 +3952,7 @@ static void raster_batch(void)
          }
      }
  
@@ -2837,7 +2951,7 @@ index 1280565..5131200 100644
      switch (s_gpu.prim) {
      case NV_PRIM_TRIANGLES:
          for (i = 0; i + 2 < s_gpu.idx_count; i += 3)
-@@ -2932,8 +3878,24 @@ static void raster_batch(void)
+@@ -2932,8 +3992,24 @@ static void raster_batch(void)
                             vertex_color(s_gpu.idx[i]));
          }
          break;
@@ -2863,7 +2977,7 @@ index 1280565..5131200 100644
      }
      if (backend_draws())
          backend_flush(textured);
-@@ -3498,6 +4460,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3498,6 +4574,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -2879,7 +2993,7 @@ index 1280565..5131200 100644
      if (s_ftrace == 2) {
          /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
           * less the bulk (vertex data, program and constant uploads). */
-@@ -3570,6 +4541,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3570,6 +4655,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case NV097_SET_SURFACE_FORMAT:
          s_gpu.format = param;
          surface_apply_clip();
@@ -2907,7 +3021,7 @@ index 1280565..5131200 100644
          break;
      case NV097_SET_SURFACE_PITCH:
          s_gpu.pitch = param & 0xFFFF;      /* colour pitch; zeta is the top half */
-@@ -3649,6 +4641,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3649,7 +4755,32 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -2931,9 +3045,16 @@ index 1280565..5131200 100644
 +            }
 +        }
          clear_surface(param);
++        s_gz.clears++;                                     /* [gx13] */
++        if (param & 0x01) {
++            s_gz.zclears++;
++            s_gz.zclear_zeta = s_gpu.zeta_offset;
++            clear_rect(&s_gz.rx0, &s_gz.ry0, &s_gz.rx1, &s_gz.ry1);
++        }
          if (param & 0x01)                         /* Z */
              zbuf_clear();
-@@ -3705,6 +4716,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         break;
+@@ -3705,6 +4836,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  
      case NV097_ARRAY_ELEMENT16:
          /* Two 16-bit indices per parameter word. */
@@ -2945,7 +3066,15 @@ index 1280565..5131200 100644
          if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
-@@ -3876,6 +4892,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3741,6 +4877,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         return;
+ 
+     case NV097_FLIP_STALL:
++        gx_watch_flip();                                   /* [gx11] */
+         if (s_ftrace == 2)
+             fprintf(stderr, "[FTRACE] FLIP_STALL presenting %08X (color now %08X)%c",
+                     s_gpu.drawn_offset, s_gpu.color_offset, 10);
+@@ -3876,6 +5013,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * them -- so they are constants that happen to arrive by method.
           * Dropped, every vertex program put its whole batch at the origin:
           * no 3D anywhere, and a black car on the garage screen. */
