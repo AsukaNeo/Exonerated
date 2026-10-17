@@ -4005,10 +4005,10 @@ index 18291d7..f447290 100644
   * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..2b91ead 100644
+index b26edfe..2ffd4f5 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -7,20 +7,52 @@
+@@ -7,20 +7,55 @@
   * implemented, none of it is observable. This is the other half: a window that
   * reads that memory and puts it on screen.
   *
@@ -4050,6 +4050,7 @@ index b26edfe..2b91ead 100644
 +#include <d3d11.h>
 +#include <dxgi1_5.h>
 +#include <d3dcompiler.h>
++#include <wincodec.h>
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
@@ -4058,6 +4059,8 @@ index b26edfe..2b91ead 100644
 +#pragma comment(lib, "dxgi.lib")
 +#pragma comment(lib, "dxguid.lib")
 +#pragma comment(lib, "d3dcompiler.lib")
++#pragma comment(lib, "windowscodecs.lib")
++#pragma comment(lib, "ole32.lib")
 +
 +#ifndef RECOMP_APP_NAME
 +#define RECOMP_APP_NAME "Recomp"
@@ -4065,7 +4068,7 @@ index b26edfe..2b91ead 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -145,6 +177,188 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -145,6 +180,188 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -4254,7 +4257,7 @@ index b26edfe..2b91ead 100644
  static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  {
      switch (m) {
-@@ -153,8 +367,38 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -153,8 +370,38 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
          InterlockedExchange(&s_fb_running, 0);
          return 0;
  
@@ -4293,7 +4296,7 @@ index b26edfe..2b91ead 100644
          xbox_InputKeySet((int)w, 1);
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
-@@ -268,15 +512,821 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -268,15 +515,981 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -4571,6 +4574,135 @@ index b26edfe..2b91ead 100644
 +    DrawTextA(s_ov.dc, s, -1, &r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 +}
 +
++/* The project's logo, for the overlay's left column: an RCDATA resource
++ * named RECOMP_OVERLAY_LOGO in the exe (a PNG, decoded with WIC), cropped to
++ * the area that is not black. Embedded rather than loaded from a path, so a
++ * packaged build needs no assets folder beside it. A project without one
++ * gets the menu alone. */
++static struct {
++    int     tried;
++    HDC     dc;
++    HBITMAP bmp, old;
++    int     w, h;
++} s_logo;
++
++static void logo_load(void)
++{
++    IWICImagingFactory *fac = NULL;
++    IWICStream *st = NULL;
++    IWICBitmapDecoder *dec = NULL;
++    IWICBitmapFrameDecode *frame = NULL;
++    IWICBitmapSource *conv = NULL;
++    uint32_t *px = NULL, *dst = NULL;
++    const BYTE *png;
++    HRSRC res;
++    HGLOBAL mem;
++    DWORD size;
++    UINT w = 0, h = 0;
++    int x, y, x0, y0, x1, y1, m, cw, chh;
++    HRESULT co;
++
++    if (s_logo.tried)
++        return;
++    s_logo.tried = 1;
++    res = FindResourceA(NULL, "RECOMP_OVERLAY_LOGO", (LPCSTR)RT_RCDATA);
++    if (!res)
++        return;
++    mem = LoadResource(NULL, res);
++    size = SizeofResource(NULL, res);
++    png = mem ? (const BYTE *)LockResource(mem) : NULL;
++    if (!png || !size)
++        return;
++
++    co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
++    if (FAILED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
++                                &IID_IWICImagingFactory, (void **)&fac))
++        || FAILED(IWICImagingFactory_CreateStream(fac, &st))
++        || FAILED(IWICStream_InitializeFromMemory(st, (BYTE *)png, size))
++        || FAILED(IWICImagingFactory_CreateDecoderFromStream(fac, (IStream *)st, NULL,
++                      WICDecodeMetadataCacheOnDemand, &dec))
++        || FAILED(IWICBitmapDecoder_GetFrame(dec, 0, &frame))
++        || FAILED(WICConvertBitmapSource(&GUID_WICPixelFormat32bppBGRA,
++                                         (IWICBitmapSource *)frame, &conv))
++        || FAILED(IWICBitmapSource_GetSize(conv, &w, &h)) || !w || !h)
++        goto out;
++    px = (uint32_t *)malloc((size_t)w * h * 4);
++    if (!px || FAILED(IWICBitmapSource_CopyPixels(conv, NULL, w * 4, w * h * 4,
++                                                  (BYTE *)px)))
++        goto out;
++
++    /* The bounding box of what is lit, against a black (or clear) ground. */
++    x0 = (int)w; y0 = (int)h; x1 = y1 = -1;
++    for (y = 0; y < (int)h; y++)
++        for (x = 0; x < (int)w; x++) {
++            uint32_t p = px[(size_t)y * w + x], a = p >> 24;
++            uint32_t r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
++            uint32_t v = r > g ? (r > b ? r : b) : (g > b ? g : b);
++            if (v * a / 255u > 40u) {
++                if (x < x0) x0 = x;
++                if (x > x1) x1 = x;
++                if (y < y0) y0 = y;
++                if (y > y1) y1 = y;
++            }
++        }
++    if (x1 < 0)
++        goto out;
++    m = (y1 - y0 + 1) / 10;                          /* a little air */
++    x0 = x0 - m < 0 ? 0 : x0 - m;
++    y0 = y0 - m < 0 ? 0 : y0 - m;
++    x1 = x1 + m >= (int)w ? (int)w - 1 : x1 + m;
++    y1 = y1 + m >= (int)h ? (int)h - 1 : y1 + m;
++    cw = x1 - x0 + 1;
++    chh = y1 - y0 + 1;
++
++    {
++        BITMAPINFO bi;
++        memset(&bi, 0, sizeof bi);
++        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
++        bi.bmiHeader.biWidth = cw;
++        bi.bmiHeader.biHeight = -chh;
++        bi.bmiHeader.biPlanes = 1;
++        bi.bmiHeader.biBitCount = 32;
++        bi.bmiHeader.biCompression = BI_RGB;
++        s_logo.bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&dst, NULL, 0);
++    }
++    if (!s_logo.bmp)
++        goto out;
++    for (y = 0; y < chh; y++)                       /* over black */
++        for (x = 0; x < cw; x++) {
++            uint32_t p = px[(size_t)(y0 + y) * w + (x0 + x)], a = p >> 24;
++            dst[(size_t)y * cw + x] =
++                ((((p >> 16) & 0xFF) * a / 255u) << 16)
++                | ((((p >> 8) & 0xFF) * a / 255u) << 8)
++                | ((p & 0xFF) * a / 255u);
++        }
++    s_logo.dc = CreateCompatibleDC(NULL);
++    s_logo.old = (HBITMAP)SelectObject(s_logo.dc, s_logo.bmp);
++    s_logo.w = cw;
++    s_logo.h = chh;
++    fprintf(stderr, "  [FBWIN] overlay logo %dx%d (from %ux%u)\n", cw, chh, w, h);
++
++out:
++    free(px);
++    if (conv) IWICBitmapSource_Release(conv);
++    if (frame) IWICBitmapFrameDecode_Release(frame);
++    if (dec) IWICBitmapDecoder_Release(dec);
++    if (st) IWICStream_Release(st);
++    if (fac) IWICImagingFactory_Release(fac);
++    if (SUCCEEDED(co))
++        CoUninitialize();
++}
++
++static void logo_free(void)
++{
++    if (s_logo.dc) {
++        SelectObject(s_logo.dc, s_logo.old);
++        DeleteObject(s_logo.bmp);
++        DeleteDC(s_logo.dc);
++        s_logo.dc = NULL;
++    }
++}
++
 +/* Draw the overlay for a cw x ch client area if it changed. Returns
 + * whether the image is new. */
 +static int ov_prepare(int cw, int ch)
@@ -4610,9 +4742,17 @@ index b26edfe..2b91ead 100644
 +    memset(s_ov.bits, 0, (size_t)cw * ch * 4);
 +    s_ov.nrects = 0;
 +
-+    fh = ch / 26;
-+    if (fh < 13) fh = 13;
-+    if (fh > 34) fh = 34;
++    /* Text size: whatever lets the whole panel fit -- about 20 text heights
++     * tall, and 26 wide for the menu plus 17 for the logo column -- capped
++     * at 22 px, which reads well at 1280x960 and above. */
++    logo_load();
++    {
++        int across = 26 + (s_logo.dc ? 17 : 0) + 2;
++        int by_h = ch / 22, by_w = cw / across;
++        fh = by_h < by_w ? by_h : by_w;
++        if (fh > 22) fh = 22;
++        if (fh < 10) fh = 10;
++    }
 +    font = CreateFontA(-fh, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
 +                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
 +                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
@@ -4631,20 +4771,42 @@ index b26edfe..2b91ead 100644
 +    }
 +
 +    if (s_ov_open) {
-+        int row = fh * 8 / 5, pad = fh, pw = fh * 22, ph, i;
++        int row = fh * 3 / 2, pad = fh, lw = s_logo.dc ? fh * 17 : 0;
++        int pw = fh * 26 + lw, ph, i, ml;
 +        RECT p, r;
-+        if (pw > cw - 2 * fh) pw = cw - 2 * fh;
++        if (pw > cw - fh) pw = cw - fh;
 +        ph = row * (OV_COUNT + 3) + pad;
 +        SetRect(&p, (cw - pw) / 2, (ch - ph) / 2, (cw + pw) / 2, (ch - ph) / 2 + ph);
 +        ov_fill(&p, RGB(16, 18, 26));
++
++        /* The logo, on black like the art itself, scaled to its column. */
++        if (lw) {
++            int aw = lw - 2 * pad, ah = ph - 2 * pad, dw, dh;
++            SetRect(&r, p.left, p.top, p.left + lw, p.bottom);
++            ov_fill(&r, RGB(0, 0, 0));
++            dw = aw;
++            dh = (int)((long long)s_logo.h * aw / s_logo.w);
++            if (dh > ah) {
++                dh = ah;
++                dw = (int)((long long)s_logo.w * ah / s_logo.h);
++            }
++            SetStretchBltMode(s_ov.dc, HALFTONE);
++            SetBrushOrgEx(s_ov.dc, 0, 0, NULL);
++            StretchBlt(s_ov.dc, p.left + (lw - dw) / 2, p.top + (ph - dh) / 2, dw, dh,
++                       s_logo.dc, 0, 0, s_logo.w, s_logo.h, SRCCOPY);
++        }
++        ml = p.left + lw;                               /* the menu's left edge */
 +        SetRect(&r, p.left, p.top, p.right, p.top + fh / 5);
 +        ov_fill(&r, RGB(220, 40, 40));                       /* accent */
 +
 +        SelectObject(s_ov.dc, bold);
-+        SetRect(&r, p.left + pad, p.top + fh / 5, p.right - pad, p.top + row * 3 / 2);
++        SetRect(&r, ml + pad, p.top + fh / 5, p.right - pad, p.top + row * 3 / 2);
 +        {
 +            char t[96];
-+            snprintf(t, sizeof t, "%s settings", s_cfg.title);
++            if (lw)                                     /* the logo names it */
++                snprintf(t, sizeof t, "Settings");
++            else
++                snprintf(t, sizeof t, "%s settings", s_cfg.title);
 +            ov_text(t, r, DT_LEFT, RGB(255, 255, 255));
 +        }
 +        SelectObject(s_ov.dc, font);
@@ -4653,7 +4815,7 @@ index b26edfe..2b91ead 100644
 +            const char *label;
 +            char value[48], shown[64];
 +            int sel = i == s_ov.sel;
-+            SetRect(&r, p.left + pad / 2, p.top + row * 3 / 2 + row * i,
++            SetRect(&r, ml + pad / 2, p.top + row * 3 / 2 + row * i,
 +                    p.right - pad / 2, p.top + row * 3 / 2 + row * (i + 1));
 +            if (sel)
 +                ov_fill(&r, RGB(70, 30, 34));
@@ -4666,11 +4828,11 @@ index b26edfe..2b91ead 100644
 +            }
 +        }
 +
-+        SetRect(&r, p.left + pad, p.bottom - row * 3 / 2, p.right - pad, p.bottom - pad / 3);
++        SetRect(&r, ml + pad, p.bottom - row * 3 / 2, p.right - pad, p.bottom - pad / 3);
 +        if ((LONG)(s_ov.status_until - GetTickCount()) > 0)
 +            ov_text(s_ov.status, r, DT_LEFT | DT_END_ELLIPSIS, RGB(140, 255, 140));
 +        else
-+            ov_text("Up/Down select   Left/Right change   A/Enter apply   B/Esc close",
++            ov_text("Arrows/D-pad: move   Enter/A: apply   Esc/B: close",
 +                    r, DT_LEFT | DT_END_ELLIPSIS, RGB(130, 134, 145));
 +        s_ov.rects[s_ov.nrects++] = p;
 +    }
@@ -4694,6 +4856,7 @@ index b26edfe..2b91ead 100644
 +
 +static void ov_free(void)
 +{
++    logo_free();
 +    if (s_ov.dc) {
 +        SelectObject(s_ov.dc, s_ov.old);
 +        DeleteObject(s_ov.bmp);
@@ -5116,7 +5279,7 @@ index b26edfe..2b91ead 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +1336,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -286,9 +1499,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -5142,7 +5305,7 @@ index b26edfe..2b91ead 100644
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
-@@ -309,36 +1372,93 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -309,36 +1535,93 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
  
@@ -5205,7 +5368,7 @@ index b26edfe..2b91ead 100644
 -                          0, 0, (int)s_fb_width, (int)s_fb_height,
 -                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
 +            have = 1;
-         }
++        }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
 +
@@ -5240,13 +5403,13 @@ index b26edfe..2b91ead 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
-+        }
+         }
 +        if (!use_d3d || !s_cfg.vsync || !(have && fresh))
 +            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,37 +1469,62 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -349,37 +1632,62 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while

@@ -134,3 +134,9 @@ file(TO_NATIVE_PATH "${XBOXRECOMP_DIR}/game_files" DR_FALLBACK_GAME_DIR_NATIVE)
 string(REPLACE "\\" "\\\\" DR_FALLBACK_GAME_DIR_C "${DR_FALLBACK_GAME_DIR_NATIVE}")
 target_compile_definitions(deathrow_recomp PRIVATE
     DR_FALLBACK_GAME_DIR="${DR_FALLBACK_GAME_DIR_C}")
+
+# The overlay's logo, embedded in the exe as RECOMP_OVERLAY_LOGO. The .rc is
+# configured with an absolute path so rc.exe finds the PNG from any folder.
+set(DR_OVERLAY_LOGO "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-logo.png")
+configure_file(src/exonerated.rc.in ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc @ONLY)
+target_sources(deathrow_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc)
