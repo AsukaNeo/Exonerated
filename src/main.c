@@ -41,6 +41,7 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 #include "game_check.h"
+#include "game_import.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -122,13 +123,20 @@ static int dr_find_game_dir(void)
         *slash = 0;
     if (dr_try_game_dir(getenv("RECOMP_GAME_DIR")))
         return 1;
+    dr_game_import_remembered(exe, cand, sizeof cand);  /* a folder picked before */
+    if (dr_try_game_dir(cand))
+        return 1;
     snprintf(cand, sizeof cand, "%s\\game", exe);
     if (dr_try_game_dir(cand))
         return 1;
     snprintf(cand, sizeof cand, "%s\\..\\..\\game", exe);
     if (dr_try_game_dir(cand))
         return 1;
+#ifdef DR_RELEASE
+    return 0;                    /* only where a player keeps it */
+#else
     return dr_try_game_dir(DR_FALLBACK_GAME_DIR);
+#endif
 }
 
 /* The switches a playable run needs, which play.sh used to supply. Set
@@ -462,7 +470,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Step 1: Load XBE */
     dr_default_env();
-    if (!dr_find_game_dir()) {
+    {
+        /* A downloaded build has no game yet. A disc image or default.xbe
+         * dropped onto the exe is set up first; with no game found, the
+         * player is asked for one (game_import.c). */
+        char exe_dir[MAX_PATH], dir[MAX_PATH], *slash;
+        DWORD attr = __argc > 1 ? GetFileAttributesA(__argv[1]) : INVALID_FILE_ATTRIBUTES;
+        int found = 0;
+        GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+        if ((slash = strrchr(exe_dir, '\\')) != NULL)
+            *slash = 0;
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)
+            && dr_game_import(exe_dir, __argv[1], dir, sizeof dir))
+            found = dr_try_game_dir(dir);
+        if (!found && !dr_find_game_dir()
+            && dr_game_import(exe_dir, NULL, dir, sizeof dir))
+            dr_try_game_dir(dir);
+    }
+    if (!s_game_dir[0]) {
         MessageBoxA(NULL, "Could not find the game files.\n\n"
                     "Exonerated needs your own copy of Deathrow (original Xbox, "
                     "North American release). Put its files (default.xbe and its "
@@ -527,7 +552,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 4: Set game directory for file I/O path translation */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        const char *save_dir = NULL;
+#ifdef DR_RELEASE
+        /* A player's saves and the Xbox cache under the game's own name,
+         * not the toolkit's shared %LOCALAPPDATA%\xboxrecomp. */
+        static char release_save[MAX_PATH];
+        const char *local = getenv("LOCALAPPDATA");
+        if (local && *local) {
+            snprintf(release_save, sizeof release_save, "%s\\Exonerated", local);
+            save_dir = release_save;
+        }
+#endif
+        xbox_path_init(YOUR_GAME_DIR, save_dir);
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */

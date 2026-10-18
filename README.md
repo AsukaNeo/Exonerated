@@ -7,14 +7,14 @@
 </p>
 
 <p align="center">
-  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-red">
+  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
   <img alt="Original: Xbox" src="https://img.shields.io/badge/original-Xbox-107C10">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
-> [!WARNING]
-> **Pre-alpha.** Full matches play from start to finish, but there is no download yet: you build it from your own copy of the game.
+> [!NOTE]
+> **Beta.** Full matches play from start to finish. Expect some graphics glitches, and please [report problems](https://github.com/AsukaNeo/Exonerated/issues).
 
 ## About
 
@@ -32,9 +32,16 @@
 
 - *Deathrow* for the original Xbox, **North American release** (version 3), as a disc image (`.iso`) or its files (`default.xbe` and the `data` folder)
 - Windows 10 or 11, 64-bit
-- Free tools, installed once: [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with **Desktop development with C++**, [Python 3.8+](https://www.python.org/downloads/) (tick **Add python.exe to PATH**), and [Git for Windows](https://git-scm.com/download/win)
 
-## Build and play
+## Download and play
+
+1. Download the latest `Exonerated-…-windows-x64.zip` from [Releases](https://github.com/AsukaNeo/Exonerated/releases) and unzip it anywhere.
+2. Double-click **`Exonerated.exe`** and choose your Deathrow disc image (`.iso`), or the `default.xbe` from its files. Exonerated checks it's the supported release and sets the game up next to itself, once.
+3. Play.
+
+## Build it yourself
+
+You also need some free tools, installed once: [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with **Desktop development with C++**, [Python 3.8+](https://www.python.org/downloads/) (tick **Add python.exe to PATH**), and [Git for Windows](https://git-scm.com/download/win).
 
 1. Download this repository (**Code → Download ZIP**, then unzip it).
 2. Make a folder called `game` inside it and put your game there.

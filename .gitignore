@@ -13,6 +13,9 @@ prof*.txt
 prof.tmp
 # build output
 build/
+# release builds and their zips (tools/make_release.py)
+build-release/
+dist/
 # local backups
 *.pre_*
 *.bak*
