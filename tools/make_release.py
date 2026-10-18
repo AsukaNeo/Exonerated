@@ -42,6 +42,10 @@ scale=fit
 fullscreen=0
 window_scale=2
 fps_counter=0
+; anisotropy: 0 (the game's own) or 2-16. sharpen: 0 (off) to 100. fxaa: 0 or 1.
+anisotropy=0
+sharpen=0
+fxaa=0
 
 [input]
 rumble=1

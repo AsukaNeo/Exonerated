@@ -2,7 +2,7 @@
 
 ## Settings overlay
 
-Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer**, **Render resolution** and **Widescreen** take effect the next time you start the game, after Save settings.
+Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, anisotropic filtering, sharpening, FXAA, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer**, **Render resolution** and **Widescreen** take effect the next time you start the game, after Save settings.
 
 Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The game keeps running underneath, but it ignores your inputs while the overlay is open.
 
@@ -35,6 +35,13 @@ widescreen=0       ; RECOMP_WIDESCREEN: 1 for the game's own 16:9 mode,
                    ;   shown 16:9 (the HUD is the game's own widescreen layout;
                    ;   the movies stretch, as on a 16:9 TV). The release's ini
                    ;   starts at 1
+anisotropy=0       ; RECOMP_ANISOTROPY: 2, 4, 8 or 16 for at least that much
+                   ;   anisotropic filtering, which keeps the pitch and walls
+                   ;   sharp at a glancing angle; 0 leaves the game's own
+                   ;   (GPU renderer only)
+sharpen=0          ; RECOMP_SHARPEN: 1-100, contrast-adaptive sharpening
+                   ;   (AMD FidelityFX CAS) of the finished frame; 0 is off
+fxaa=0             ; RECOMP_FXAA: 1 to smooth jagged edges (FXAA)
 
 [input]
 rumble=1           ; RECOMP_RUMBLE: 0 to turn it off
