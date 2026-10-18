@@ -162,6 +162,32 @@ static void dr_default_env(void)
     for (i = 0; i < sizeof defaults / sizeof defaults[0]; i++)
         if (!getenv(defaults[i][0]))
             _putenv_s(defaults[i][0], defaults[i][1]);
+
+    /* The renderer: the GPU back end unless [display] renderer=software.
+     * Settled here, before anything asks, because the back end is chosen
+     * once. The ini is the one the window reads (fb_present.c): RECOMP_INI,
+     * then the working directory, then beside the exe. */
+    if (!getenv("RECOMP_PB_BACKEND")) {
+        char ini[MAX_PATH], val[32], *slash;
+        const char *v = getenv("RECOMP_INI");
+        DWORD a;
+        ini[0] = 0;
+        if (v && *v)
+            snprintf(ini, sizeof ini, "%s", v);
+        else {
+            if (GetCurrentDirectoryA(sizeof ini, ini))
+                strncat(ini, "\\exonerated.ini", sizeof ini - strlen(ini) - 1);
+            a = GetFileAttributesA(ini);
+            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
+                GetModuleFileNameA(NULL, ini, MAX_PATH);
+                if ((slash = strrchr(ini, '\\')) != NULL)
+                    *slash = 0;
+                strncat(ini, "\\exonerated.ini", sizeof ini - strlen(ini) - 1);
+            }
+        }
+        GetPrivateProfileStringA("display", "renderer", "gpu", val, sizeof val, ini);
+        _putenv_s("RECOMP_PB_BACKEND", _stricmp(val, "software") ? "d3d11" : "cpu");
+    }
 }
 
 /* ── Forward declarations ──────────────────────────────────── */
@@ -414,8 +440,11 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Deathrow plays its intro movies (Data\movies\*.wmv) on the video overlay,
- * which nothing here displays. Play the file the game opened in a window. */
+/* Deathrow plays its movies (Data\movies\*.wmv) on the video overlay, which
+ * the game window now shows in place (xboxrecomp pvideo_overlay.c): the
+ * intros full screen, the game-mode menu's clip in its strip. The opened
+ * file is still logged. DR_FMV_WINDOW=1 brings back the old stand-in, the
+ * same file decoded by Media Foundation in a window of its own. */
 extern void (*g_xbox_path_hook)(const char *xbox_path);
 extern int xbox_VideoPlayFile(const char *host_path);
 extern int xbox_VideoIsPlaying(void);
@@ -437,7 +466,8 @@ static void deathrow_path_hook(const char *xp)
     strncpy(last, m, sizeof(last) - 1);
     snprintf(host, sizeof(host), "%s\\data\\%s", YOUR_GAME_DIR, m);
     fprintf(stderr, "[FMV] playing %s\n", host);
-    xbox_VideoPlayFile(host);
+    if (getenv("DR_FMV_WINDOW") && strcmp(getenv("DR_FMV_WINDOW"), "0"))
+        xbox_VideoPlayFile(host);
 }
 
 /* ── WinMain ───────────────────────────────────────────────── */
@@ -471,17 +501,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 1: Load XBE */
     dr_default_env();
     {
-        /* A downloaded build has no game yet. A disc image or default.xbe
-         * dropped onto the exe is set up first; with no game found, the
-         * player is asked for one (game_import.c). */
-        char exe_dir[MAX_PATH], dir[MAX_PATH], *slash;
-        DWORD attr = __argc > 1 ? GetFileAttributesA(__argv[1]) : INVALID_FILE_ATTRIBUTES;
+        /* A downloaded build has no game yet. A disc image, default.xbe or
+         * the game's folder dropped onto the exe is set up first; with no
+         * game found, the player is asked for one (game_import.c). */
+        char exe_dir[MAX_PATH], dir[MAX_PATH], arg[MAX_PATH], *slash;
+        DWORD attr = INVALID_FILE_ATTRIBUTES;
         int found = 0;
+        arg[0] = 0;
+        if (__argc > 1) {
+            snprintf(arg, sizeof arg, "%s", __argv[1]);
+            attr = GetFileAttributesA(arg);
+            fprintf(stderr, "[BOOT] opened with %s%s\n", arg,
+                    attr == INVALID_FILE_ATTRIBUTES ? " (not found)" : "");
+        }
+        /* A folder: its default.xbe, used in place like a chosen one. */
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            strncat(arg, "\\default.xbe", sizeof arg - strlen(arg) - 1);
+            attr = GetFileAttributesA(arg);
+        }
         GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
         if ((slash = strrchr(exe_dir, '\\')) != NULL)
             *slash = 0;
         if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)
-            && dr_game_import(exe_dir, __argv[1], dir, sizeof dir))
+            && dr_game_import(exe_dir, arg, dir, sizeof dir))
             found = dr_try_game_dir(dir);
         if (!found && !dr_find_game_dir()
             && dr_game_import(exe_dir, NULL, dir, sizeof dir))

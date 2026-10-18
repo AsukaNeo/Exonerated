@@ -9920,7 +9920,7 @@ index 8acb0af..0bd5095 100644
 +
  #endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 362cefe..2a51478 100644
+index 362cefe..ab4399b 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -72,6 +72,17 @@ static HANDLE g_mapping_handle = NULL;
@@ -10005,7 +10005,61 @@ index 362cefe..2a51478 100644
  static int s_nv2a_trace = 0;
  
  /* The display framebuffer, as reported by AvSetDisplayMode. Checksummed once a
-@@ -1400,7 +1461,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1350,16 +1411,52 @@ static void framebuffer_probe_tick(void)
+  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
+  * from inside the walk answers the kickoff within a few hundred commands,
+  * without a thread of its own spinning on a host core. */
++/* The overlay buffer the title last handed the video scaler: PVIDEO_BUFFER
++ * bit 0 for buffer 0, bit 4 for buffer 1. The ack below clears the request
++ * as the scaler would once it has the buffer, so this is the only record of
++ * which one is on screen. 0 until the title first shows an overlay. */
++static volatile LONG s_pvideo_buffer, s_pvideo_submits, s_pvideo_stopped;
++
++uint32_t xbox_PvideoBuffer(void)
++{
++    return (uint32_t)s_pvideo_buffer;
++}
++
++/* How many buffers the title has handed the scaler: a movie hands one per
++ * frame, so a count that stops moving is a movie that stopped. */
++uint32_t xbox_PvideoSubmits(void)
++{
++    return (uint32_t)s_pvideo_submits;
++}
++
++/* The submit count when the title last stopped the overlay (PVIDEO_STOP):
++ * the overlay is off until a buffer is handed over after it. */
++uint32_t xbox_PvideoStoppedAt(void)
++{
++    return (uint32_t)s_pvideo_stopped;
++}
++
+ void xbox_Nv2aAckBusyBits(void)
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
+ 
+     if (!regs)
+         return;
++    /* PVIDEO_STOP bit 0: the title asks the scaler to stop showing the
++     * overlay. Taken like a request, so a later stop is seen too. */
++    if (regs[0x8704 / 4] & 1u) {
++        regs[0x8704 / 4] &= ~1u;
++        InterlockedExchange(&s_pvideo_stopped, s_pvideo_submits);
++    }
+     for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+         volatile uint32_t *r =
+             (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+-        if (*r & NV2A_ACK[i].busy_mask) {
++        uint32_t v = *r;
++        if (v & NV2A_ACK[i].busy_mask) {
++            if (NV2A_ACK[i].offset == 0x008700) {
++                InterlockedExchange(&s_pvideo_buffer, (LONG)(v & 0x11u));
++                InterlockedIncrement(&s_pvideo_submits);
++            }
+             *r &= ~NV2A_ACK[i].busy_mask;
+         }
+     }
+@@ -1400,7 +1497,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           *
           * The advance now happens after the scan, further down, which is
           * also the only ordering that gives the title real back-pressure. */
@@ -10021,7 +10075,7 @@ index 362cefe..2a51478 100644
          dsp_ack_tick();
          poke_tick();
          counter_mirrors_tick();
-@@ -1429,6 +1497,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1429,6 +1533,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              DWORD now_ms = GetTickCount();
              uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
              if (put != last_put || (now_ms - last_put_ms) > 2000) {
@@ -10030,7 +10084,7 @@ index 362cefe..2a51478 100644
                  /* Survey the segment the title just submitted, once. */
                  {
                      extern void nv2a_pb_scan(uint32_t);
-@@ -1479,14 +1549,48 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1479,14 +1585,48 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                              nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
                                                   XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
                          } else if (last_put && put < last_put) {
@@ -10087,7 +10141,7 @@ index 362cefe..2a51478 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -1516,6 +1620,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1516,6 +1656,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      get_written = put;
                  }
                  last_put = put; last_put_ms = now_ms;
@@ -10096,7 +10150,7 @@ index 362cefe..2a51478 100644
                  /* GET as well as PUT. A title that stops submitting has either
                   * finished or is spinning on the GPU catching up, and only GET
                   * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -1562,6 +1668,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1562,6 +1704,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -10105,7 +10159,7 @@ index 362cefe..2a51478 100644
          Sleep(0);  /* yield; the waiter is spinning on another core */
      }
      return 0;
-@@ -1641,6 +1749,17 @@ extern volatile uint32_t g_icall_trace_idx;
+@@ -1641,6 +1785,17 @@ extern volatile uint32_t g_icall_trace_idx;
  void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
                                uint32_t edi0, uint32_t esp0)
  {
@@ -10123,7 +10177,7 @@ index 362cefe..2a51478 100644
      enum { SLOTS = 32 };
      static uint32_t seen[SLOTS];
      static uint64_t hits[SLOTS];
-@@ -2356,6 +2475,17 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+@@ -2356,6 +2511,17 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
                  WD_NV2A(NV2A_PFIFO_DMA_PUT), WD_NV2A(NV2A_PFIFO_DMA_GET),
                  WD_NV2A(NV2A_PFIFO_REF), WD_NV2A(NV2A_PFIFO_DMA_SUBROUTINE));
  #undef WD_NV2A
@@ -10141,7 +10195,7 @@ index 362cefe..2a51478 100644
      }
  
      for (i = 0; i < 400 && esp; i++) {
-@@ -3405,6 +3535,45 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -3405,6 +3571,45 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  (int)((mirrors_ok + 1) * g_memory_size / (1024 * 1024)));
      }
  
@@ -10187,7 +10241,7 @@ index 362cefe..2a51478 100644
      /* Guest address space above the mirrors, for titles that ask for a specific
       * high address. RECOMP_EXT_VMA; a no-op without it. Straight after the
       * mirrors, while a fixed host address is still likely to be free. */
-@@ -3590,6 +3759,11 @@ void xbox_MemoryLayoutShutdown(void)
+@@ -3590,6 +3795,11 @@ void xbox_MemoryLayoutShutdown(void)
       * tiled alias, and every one of those comes back as "failed" while init
       * still returns TRUE because they are best-effort. The result is a layout
       * that looks initialised and has no device apertures at all. */
@@ -10199,7 +10253,7 @@ index 362cefe..2a51478 100644
      if (g_tiled_view) {
          UnmapViewOfFile(g_tiled_view);
          g_tiled_view = NULL;
-@@ -4039,6 +4213,130 @@ static void contig_take(uint32_t first, uint32_t n)
+@@ -4039,6 +4249,130 @@ static void contig_take(uint32_t first, uint32_t n)
          g_contig_first_free++;
  }
  
@@ -10330,7 +10384,7 @@ index 362cefe..2a51478 100644
  uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
                                  uint32_t phys_lo, uint32_t phys_hi)
  {
-@@ -4060,6 +4358,8 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+@@ -4060,6 +4394,8 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
      if (limit > CONTIG_USABLE) limit = CONTIG_USABLE;
  
      contig_lock();
@@ -10339,7 +10393,7 @@ index 362cefe..2a51478 100644
      if (lo_page < g_contig_first_free) lo_page = g_contig_first_free;
      p = (lo_page + align_pages - 1) & ~(align_pages - 1);
      while ((uint64_t)p + n <= limit) {
-@@ -4083,6 +4383,15 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+@@ -4083,6 +4419,15 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
      if (result) {
          g_contig_allocs++;
          contig_report("alloc", result, n);
@@ -10355,7 +10409,7 @@ index 362cefe..2a51478 100644
      } else {
          uint32_t best = 0, run = 0;
          for (q = 0; q < CONTIG_USABLE; q++) {
-@@ -4167,13 +4476,19 @@ int xbox_ContiguousFree(uint32_t va)
+@@ -4167,13 +4512,19 @@ int xbox_ContiguousFree(uint32_t va)
          }
          return 0;
      }
@@ -10380,7 +10434,7 @@ index 362cefe..2a51478 100644
      contig_unlock();
      return 1;
  }
-@@ -4226,85 +4541,52 @@ uint32_t xbox_ContiguousInUseBytes(void)
+@@ -4226,85 +4577,52 @@ uint32_t xbox_ContiguousInUseBytes(void)
      return g_contig_pages_in_use * CONTIG_PAGE;
  }
  
@@ -10501,7 +10555,7 @@ index 362cefe..2a51478 100644
  }
  
  
-@@ -4491,7 +4773,7 @@ void xbox_HeapFree(uint32_t xbox_va)
+@@ -4491,7 +4809,7 @@ void xbox_HeapFree(uint32_t xbox_va)
           * over the empty slots (size 0) earlier merges leave behind; without
           * that, one merge stops every later one dead. */
          {
@@ -10510,7 +10564,7 @@ index 362cefe..2a51478 100644
              if (xbox_HeapReclaimEnabled()) {
                  while (n < g_heap_block_count && g_heap_blocks[n].size == 0) n++;
                  while (p >= 0 && g_heap_blocks[p].size == 0) p--;
-@@ -4507,12 +4789,7 @@ void xbox_HeapFree(uint32_t xbox_va)
+@@ -4507,12 +4825,7 @@ void xbox_HeapFree(uint32_t xbox_va)
                  g_heap_blocks[p].size += g_heap_blocks[i].size;
                  g_heap_blocks[i].size = 0;
                  g_heap_blocks[i].addr = 0;
@@ -11013,11 +11067,23 @@ index 18291d7..f447290 100644
  /* The address the host assigned pad `pad` with SET_ADDRESS, 0 until it does,
   * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
+diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
+index 4e86a08..8b2fee2 100644
+--- a/src/video/CMakeLists.txt
++++ b/src/video/CMakeLists.txt
+@@ -3,6 +3,7 @@ add_library(xbox_video STATIC
+     video_player.c
+     video_pump.c
+     fb_present.c
++    pvideo_overlay.c
+ )
+ target_include_directories(xbox_video PUBLIC
+     ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..1ce92eb 100644
+index b26edfe..2da5f29 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -7,20 +7,63 @@
+@@ -7,20 +7,66 @@
   * implemented, none of it is observable. This is the other half: a window that
   * reads that memory and puts it on screen.
   *
@@ -11049,6 +11115,9 @@ index b26edfe..1ce92eb 100644
 + *                                      that multiple of the guest's size,
 + *                                      and the window shows its image.
 + *                                      Read at start.
++ *   RECOMP_PB_BACKEND    renderer      gpu (RECOMP_PB_BACKEND=d3d11) or software
++ *                                      (default): shown and saved here; the
++ *                                      title's start-up applies the key.
 + *   RECOMP_WIDESCREEN    widescreen    0 (default) or 1: tell the title the
 + *                                      TV is 16:9 (it draws anamorphic) and
 + *                                      show the frame 16:9. Read at start.
@@ -11085,7 +11154,7 @@ index b26edfe..1ce92eb 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -34,6 +77,12 @@
+@@ -34,6 +80,12 @@
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
  static volatile LONG s_fb_running;
@@ -11098,7 +11167,7 @@ index b26edfe..1ce92eb 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -51,6 +100,39 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -51,6 +103,48 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -11124,6 +11193,15 @@ index b26edfe..1ce92eb 100644
 +    InterlockedExchange(&s_gpu_mark, 1);
 +}
 +
++/* The video overlay a title plays its movies on (pvideo_overlay.c), drawn
++ * over the frame by the D3D11 presenter. */
++extern void     xbox_PvideoTrace(void);
++extern uint32_t xbox_PvideoChangeCount(void);
++extern int      xbox_PvideoDrawD3D11(void *dev, void *ctx, void *frame_srv,
++                                     float x, float y, float w, float h,
++                                     uint32_t fb_w, uint32_t fb_h);
++extern void     xbox_PvideoReleaseD3D11(void);
++
 +/* The guest frame's size, which the GPU image is a multiple of. 0 while no
 + * window is up. */
 +int xbox_FramebufferWindowFrameSize(uint32_t *width, uint32_t *height)
@@ -11138,7 +11216,7 @@ index b26edfe..1ce92eb 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -120,6 +202,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -120,6 +214,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -11146,7 +11224,7 @@ index b26edfe..1ce92eb 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -145,16 +228,283 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -145,16 +240,294 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -11158,6 +11236,7 @@ index b26edfe..1ce92eb 100644
 +static struct {
 +    int  vsync, filter, scale, fullscreen, window_scale, gdi, fps_counter;
 +    int  rumble, deadzone;  /* [input]; applied to the input layer at start */
++    int  gpu;               /* the GPU back end draws (RECOMP_PB_BACKEND=d3d11) */
 +    int  render_scale;      /* GPU back end target size, x the guest's; read at start */
 +    int  widescreen;        /* the title is told 16:9 and the frame shown 16:9; at start */
 +    char title[64];
@@ -11315,16 +11394,26 @@ index b26edfe..1ce92eb 100644
 +    if (s_cfg.render_scale < 1 || s_cfg.render_scale > 4)
 +        s_cfg.render_scale = 1;
 +    s_cfg.widescreen = cfg_int("RECOMP_WIDESCREEN", "widescreen", 0) != 0;
++    /* The back end is chosen by RECOMP_PB_BACKEND, which the title's own
++     * start-up may have set from this same key; shown and saved here as
++     * gpu or software. */
++    v = getenv("RECOMP_PB_BACKEND");
++    if (v && *v)
++        s_cfg.gpu = !strcmp(v, "d3d11");
++    else {
++        cfg_str("RECOMP_RENDERER", "renderer", "software", buf, sizeof buf);
++        s_cfg.gpu = !_stricmp(buf, "gpu") || !_stricmp(buf, "d3d11");
++    }
 +
 +    fprintf(stderr, "  [FBWIN] settings%s%s: vsync %d filter %s scale %s "
-+            "fullscreen %d window x%d present %s render x%d widescreen %d\n",
++            "fullscreen %d window x%d present %s renderer %s x%d widescreen %d\n",
 +            s_ini[0] ? " from " : " (no ini)", s_ini, s_cfg.vsync,
 +            s_cfg.filter == FILTER_NEAREST ? "nearest"
 +            : s_cfg.filter == FILTER_BILINEAR ? "bilinear" : "sharp",
 +            s_cfg.scale == SCALE_INTEGER ? "integer"
 +            : s_cfg.scale == SCALE_STRETCH ? "stretch" : "fit",
 +            s_cfg.fullscreen, s_cfg.window_scale, s_cfg.gdi ? "gdi" : "d3d11",
-+            s_cfg.render_scale, s_cfg.widescreen);
++            s_cfg.gpu ? "gpu" : "software", s_cfg.render_scale, s_cfg.widescreen);
 +}
 +
 +/* Where the frame goes in a cw x ch client area. */
@@ -11430,7 +11519,7 @@ index b26edfe..1ce92eb 100644
          xbox_InputKeySet((int)w, 1);
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
-@@ -268,15 +618,1085 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -268,15 +641,1107 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -11445,13 +11534,14 @@ index b26edfe..1ce92eb 100644
 + * Drawn with GDI into a 32-bit DIB the size of the client area -- real
 + * anti-aliased text at the window's own resolution -- then blended over the
 + * frame by the D3D11 presenter, or copied over it opaque by the GDI one. */
-+enum { OV_FULLSCREEN, OV_VSYNC, OV_FILTER, OV_SCALE, OV_RENDER, OV_WIDE, OV_FPS, OV_RUMBLE,
-+       OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_CLOSE, OV_COUNT };
++enum { OV_FULLSCREEN, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE, OV_FPS,
++       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_CLOSE, OV_COUNT };
 +
-+/* The render scale and widescreen picked in the overlay. The GPU back end
-+ * sizes its targets once and the title reads its video settings once, so new
-+ * values are saved for the next start rather than applied. -1 / 0 until the
-+ * overlay first shows them. */
++/* The renderer, render scale and widescreen picked in the overlay. The back
++ * end is chosen and sizes its targets once, and the title reads its video
++ * settings once, so new values are saved for the next start rather than
++ * applied. -1 / 0 until the overlay first shows them. */
++static int s_gpu_pending = -1;
 +static int s_render_pending;
 +static int s_wide_pending = -1;
 +
@@ -11520,9 +11610,12 @@ index b26edfe..1ce92eb 100644
 +static void ov_item(int i, const char **label, char *value, size_t n)
 +{
 +    static const char *const labels[OV_COUNT] = {
-+        "Fullscreen", "VSync", "Filter", "Scale", "Render resolution", "Widescreen (16:9)",
-+        "FPS counter", "Rumble", "Stick dead zone", "Take screenshot", "Save settings", "Close"
++        "Fullscreen", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
++        "Widescreen (16:9)", "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
++        "Save settings", "Close"
 +    };
++    if (s_gpu_pending < 0)
++        s_gpu_pending = s_cfg.gpu;
 +    if (!s_render_pending)
 +        s_render_pending = s_cfg.render_scale;
 +    if (s_wide_pending < 0)
@@ -11536,8 +11629,14 @@ index b26edfe..1ce92eb 100644
 +                                 : s_cfg.filter == FILTER_BILINEAR ? "Bilinear" : "Nearest"); break;
 +    case OV_SCALE:      snprintf(value, n, "%s", s_cfg.scale == SCALE_FIT ? "Fit (4:3)"
 +                                 : s_cfg.scale == SCALE_INTEGER ? "Integer" : "Stretch"); break;
++    case OV_GPU:
++        snprintf(value, n, "%s%s", s_gpu_pending ? "GPU" : "Software",
++                 s_gpu_pending != s_cfg.gpu ? " after save + restart" : "");
++        break;
 +    case OV_RENDER:
-+        if (s_render_pending == s_cfg.render_scale)
++        if (!s_cfg.gpu && s_render_pending == s_cfg.render_scale)
++            snprintf(value, n, "%dx (GPU renderer only)", s_render_pending);
++        else if (s_render_pending == s_cfg.render_scale)
 +            snprintf(value, n, "%dx (%ux%u)", s_render_pending,
 +                     s_fb_width * (uint32_t)s_render_pending, s_fb_height * (uint32_t)s_render_pending);
 +        else
@@ -11578,6 +11677,9 @@ index b26edfe..1ce92eb 100644
 +    ok &= WritePrivateProfileStringA("display", "fps_counter", s_cfg.fps_counter ? "1" : "0", s_ini);
 +    snprintf(v, sizeof v, "%d", s_cfg.window_scale);
 +    ok &= WritePrivateProfileStringA("display", "window_scale", v, s_ini);
++    ok &= WritePrivateProfileStringA("display", "renderer",
++                                     (s_gpu_pending < 0 ? s_cfg.gpu : s_gpu_pending)
++                                         ? "gpu" : "software", s_ini);
 +    snprintf(v, sizeof v, "%d", s_render_pending ? s_render_pending : s_cfg.render_scale);
 +    ok &= WritePrivateProfileStringA("display", "render_scale", v, s_ini);
 +    ok &= WritePrivateProfileStringA("display", "widescreen",
@@ -11606,6 +11708,9 @@ index b26edfe..1ce92eb 100644
 +    case OV_VSYNC:      s_cfg.vsync = !s_cfg.vsync; break;
 +    case OV_FILTER:     s_cfg.filter = (s_cfg.filter + 3 + dir) % 3; break;
 +    case OV_SCALE:      s_cfg.scale = (s_cfg.scale + 3 + dir) % 3; break;
++    case OV_GPU:
++        s_gpu_pending = !(s_gpu_pending < 0 ? s_cfg.gpu : s_gpu_pending);
++        break;
 +    case OV_RENDER:
 +        if (!s_render_pending)
 +            s_render_pending = s_cfg.render_scale;
@@ -12115,6 +12220,7 @@ index b26edfe..1ce92eb 100644
 +    SAFE_RELEASE(d3d.g_srv); SAFE_RELEASE(d3d.g_tex);
 +    SAFE_RELEASE(d3d.g_mutex); SAFE_RELEASE(d3d.g_shared);
 +    d3d.g_gen = 0; d3d.g_have = 0;
++    xbox_PvideoReleaseD3D11();
 +    SAFE_RELEASE(d3d.sc);  SAFE_RELEASE(d3d.ctx); SAFE_RELEASE(d3d.dev);
 +}
 +
@@ -12392,6 +12498,10 @@ index b26edfe..1ce92eb 100644
 +    ID3D11DeviceContext_PSSetConstantBuffers(d3d.ctx, 0, 1, &d3d.cb);
 +    ID3D11DeviceContext_Draw(d3d.ctx, 3, 0);
 +
++    /* The title's movie, on the video overlay, over the frame. */
++    xbox_PvideoDrawD3D11(d3d.dev, d3d.ctx, srv, (float)x, (float)y, (float)w, (float)h,
++                         s_fb_width, s_fb_height);
++
 +    /* The overlay, over the whole client area at its own resolution. */
 +    if (ov_visible() && d3d.pso && d3d.blend) {
 +        int fresh_img = ov_prepare(cr.right, cr.bottom);
@@ -12508,6 +12618,7 @@ index b26edfe..1ce92eb 100644
 +    RECT r, wa;
 +    int use_d3d;
 +    LONG last_flips = -1;
++    uint32_t last_pvideo = 0;
 +    DWORD last_draw = 0;
 +    int need_resize = 0;
  
@@ -12517,7 +12628,7 @@ index b26edfe..1ce92eb 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +1706,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -286,9 +1751,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -12543,7 +12654,7 @@ index b26edfe..1ce92eb 100644
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
-@@ -309,36 +1742,93 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -309,36 +1787,96 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
  
@@ -12609,6 +12720,7 @@ index b26edfe..1ce92eb 100644
          }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
++        xbox_PvideoTrace();
 +
 +        /* Draw when there is something new: a flip, a resize, or (before
 +         * the first flip) the guest memory read every 16 ms. With vsync the
@@ -12617,9 +12729,11 @@ index b26edfe..1ce92eb 100644
 +        resized = InterlockedExchange(&s_resized, 0) != 0;
 +        need_resize |= resized;          /* kept until the next draw */
 +        fresh = s_flips != last_flips || resized || s_ov.dirty
++                || xbox_PvideoChangeCount() != last_pvideo  /* a movie frame */
 +                || s_present_idx < 0 || GetTickCount() - last_draw >= 100;
 +        if (have && fresh) {
 +            last_flips = s_flips;
++            last_pvideo = xbox_PvideoChangeCount();
 +            last_draw = GetTickCount();
 +            if (use_d3d) {
 +                HRESULT hr;
@@ -12647,7 +12761,7 @@ index b26edfe..1ce92eb 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,41 +1839,71 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -349,41 +1887,71 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -12733,7 +12847,7 @@ index b26edfe..1ce92eb 100644
      return 0;
  }
  
-@@ -391,7 +1911,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -391,7 +1959,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -12742,3 +12856,420 @@ index b26edfe..1ce92eb 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
+diff --git a/src/video/pvideo_overlay.c b/src/video/pvideo_overlay.c
+new file mode 100644
+index 0000000..696e4e3
+--- /dev/null
++++ b/src/video/pvideo_overlay.c
+@@ -0,0 +1,411 @@
++/**
++ * The NV2A video overlay (PVIDEO), shown in the framebuffer window.
++ *
++ * Titles play their movies on the video scaler, not in the framebuffer: the
++ * title's own decoder writes YUY2 frames to memory and points PVIDEO at
++ * them, and on hardware the scaler blends them over the scanout -- full
++ * screen for an intro, a letterboxed band, or a strip inside a menu, where
++ * the menu leaves a hole for it. Nothing here scans out, so without this a
++ * movie the title is playing perfectly well is simply not seen.
++ *
++ * The registers are plain memory in the aperture (xbox_Nv2aRegPtr), and the
++ * kernel's acknowledgement of PVIDEO_BUFFER and PVIDEO_STOP records which
++ * buffer was handed over last and when the title stopped the overlay
++ * (xbox_memory_layout.c). That is all the scaler needs: the window draws the
++ * buffer on top of the frame, scaled to its output rectangle, and only where
++ * the frame shows the colour key when the title asked for one.
++ *
++ * RECOMP_PVIDEO=0 turns it off. RECOMP_PVIDEO_TRACE logs the registers.
++ */
++#include <stdint.h>
++
++#if defined(_WIN32)
++#define COBJMACROS
++#include <windows.h>
++#include <d3d11.h>
++#include <d3dcompiler.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++extern ptrdiff_t xbox_GetMemoryOffset(void);
++extern volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
++extern uint32_t xbox_PvideoBuffer(void);
++extern uint32_t xbox_PvideoSubmits(void);
++extern uint32_t xbox_PvideoStoppedAt(void);
++
++#define CONTIG_SIZE    (64u * 1024u * 1024u)   /* kernel.h XBOX_CONTIG_SIZE */
++
++#define PV_STOP        0x8704u
++#define PV_BASE(i)     (0x8900u + 4u * (i))
++#define PV_LIMIT(i)    (0x8908u + 4u * (i))
++#define PV_OFFSET(i)   (0x8920u + 4u * (i))
++#define PV_SIZE_IN(i)  (0x8928u + 4u * (i))
++#define PV_POINT_IN(i) (0x8930u + 4u * (i))
++#define PV_DS_DX(i)    (0x8938u + 4u * (i))
++#define PV_DT_DY(i)    (0x8940u + 4u * (i))
++#define PV_POINT_OUT(i) (0x8948u + 4u * (i))
++#define PV_SIZE_OUT(i) (0x8950u + 4u * (i))
++#define PV_FORMAT(i)   (0x8958u + 4u * (i))
++#define PV_COLOR_KEY   0x8B00u
++
++static uint32_t pv_reg(uint32_t off)
++{
++    volatile uint32_t *r = xbox_Nv2aRegPtr(off);
++    return r ? *r : 0;
++}
++
++/* What the scaler would be showing now, in guest-frame pixels. */
++typedef struct {
++    const uint8_t *pixels;           /* YUY2 rows in guest memory */
++    uint32_t pitch, in_w, in_h;
++    float    pin_s, pin_t, ds, dt;   /* source start, and step per output pixel */
++    uint32_t out_x, out_y, out_w, out_h;
++    int      keyed;                  /* only where the frame shows the key */
++    uint32_t key;
++} PvState;
++
++/* 0 when no overlay is up: never started, stopped, or no buffer handed over
++ * for half a second (a movie that ended without a stop). Only the YUY2
++ * format movies use, within the contiguous window. */
++static int pv_state(PvState *p, uint32_t fb_w, uint32_t fb_h)
++{
++    static uint32_t last_submits;
++    static DWORD last_tick;
++    uint32_t n = xbox_PvideoSubmits(), i, fmt, in, pin, out, size, addr;
++    DWORD now = GetTickCount();
++
++    if (n != last_submits) {
++        last_submits = n;
++        last_tick = now;
++    }
++    if (!n || n == xbox_PvideoStoppedAt() || now - last_tick > 500)
++        return 0;
++    i = (xbox_PvideoBuffer() & 0x10u) ? 1 : 0;
++    fmt = pv_reg(PV_FORMAT(i));
++    if (((fmt >> 16) & 3u) != 1u)    /* LE_CR8YB8CB8YA8: bytes Y0 U Y1 V */
++        return 0;
++    out = pv_reg(PV_POINT_OUT(i));
++    size = pv_reg(PV_SIZE_OUT(i));
++    p->out_x = out & 0xFFFu;
++    p->out_y = (out >> 16) & 0xFFFu;
++    p->out_w = size & 0xFFFu;
++    p->out_h = (size >> 16) & 0xFFFu;
++    if (!p->out_w || !p->out_h || p->out_x >= fb_w || p->out_y >= fb_h)
++        return 0;
++    /* SIZE_IN reads all ones for a moment while the title rewrites it. */
++    in = pv_reg(PV_SIZE_IN(i));
++    p->in_w = in & 0x7FFu;
++    p->in_h = (in >> 16) & 0x7FFu;
++    if (in == 0xFFFFFFFFu || !p->in_w || !p->in_h) {
++        p->in_w = p->out_w;
++        p->in_h = p->out_h;
++    }
++    p->pitch = fmt & 0x1FFFu;
++    if (p->pitch < p->in_w * 2)
++        return 0;
++    pin = pv_reg(PV_POINT_IN(i));
++    p->pin_s = (float)(pin & 0x7FFFu) / 16.0f;      /* 12.4 */
++    p->pin_t = (float)(pin >> 17) / 8.0f;           /* 12.3, from bit 17 */
++    p->ds = (float)pv_reg(PV_DS_DX(i)) / 1048576.0f; /* 12.20 */
++    p->dt = (float)pv_reg(PV_DT_DY(i)) / 1048576.0f;
++    if (p->ds <= 0.0f || p->ds > 16.0f) p->ds = 1.0f;
++    if (p->dt <= 0.0f || p->dt > 16.0f) p->dt = 1.0f;
++    addr = pv_reg(PV_BASE(i)) + pv_reg(PV_OFFSET(i));
++    if (!addr || (uint64_t)addr + (uint64_t)p->pitch * p->in_h > CONTIG_SIZE)
++        return 0;
++    /* Physical P is visible at 0x80000000 + P (the contiguous window). */
++    p->pixels = (const uint8_t *)((uintptr_t)(0x80000000u + addr) + xbox_GetMemoryOffset());
++    p->keyed = (fmt & 0x00100000u) != 0;            /* DISPLAY_COLOR_KEY */
++    p->key = pv_reg(PV_COLOR_KEY);
++    return 1;
++}
++
++/* RECOMP_PVIDEO_TRACE: the shown buffer's registers whenever they change. */
++void xbox_PvideoTrace(void)
++{
++    static int on = -1, lines;
++    static uint32_t last[12];
++    uint32_t cur[12], i = (xbox_PvideoBuffer() & 0x10u) ? 1 : 0, j;
++    int changed = 0;
++
++    if (on < 0)
++        on = getenv("RECOMP_PVIDEO_TRACE") != NULL;
++    if (!on || lines > 400)
++        return;
++    cur[0] = xbox_PvideoBuffer();       cur[1] = xbox_PvideoStoppedAt() == xbox_PvideoSubmits();
++    cur[2] = pv_reg(PV_BASE(i)) + pv_reg(PV_OFFSET(i));
++    cur[3] = pv_reg(PV_SIZE_IN(i));     cur[4] = pv_reg(PV_POINT_IN(i));
++    cur[5] = pv_reg(PV_DS_DX(i));       cur[6] = pv_reg(PV_DT_DY(i));
++    cur[7] = pv_reg(PV_POINT_OUT(i));   cur[8] = pv_reg(PV_SIZE_OUT(i));
++    cur[9] = pv_reg(PV_FORMAT(i));      cur[10] = pv_reg(PV_COLOR_KEY);
++    cur[11] = pv_reg(PV_LIMIT(i));
++    for (j = 0; j < 12; j++)
++        changed |= j != 2 && cur[j] != last[j];   /* not each new frame */
++    if (!changed)
++        return;
++    memcpy(last, cur, sizeof last);
++    lines++;
++    fprintf(stderr, "  [PVIDEO] buf %X stopped %u addr %08X in %08X pin %08X ds %08X "
++            "dt %08X pout %08X sout %08X fmt %08X key %08X lim %08X\n",
++            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7], cur[8],
++            cur[9], cur[10], cur[11]);
++}
++
++/* A count that changes whenever the overlay may look different, so the
++ * window draws again even when the title is not flipping. */
++uint32_t xbox_PvideoChangeCount(void)
++{
++    return xbox_PvideoSubmits();
++}
++
++/* ---- D3D11 pass ----------------------------------------------------------
++ *
++ * The YUY2 rows go up as they are, one RGBA texel per pixel pair (r Y0,
++ * g U, b Y1, a V), and the shader unpacks, converts (BT.601, video range)
++ * and filters them: bilinear between converted pixels, so the packing never
++ * blends a luma with a chroma byte. */
++static const char s_pv_hlsl[] =
++    "Texture2D frame : register(t0);\n"
++    "Texture2D<float4> yuy2 : register(t1);\n"
++    "SamplerState sp : register(s0);\n"
++    "cbuffer P : register(b0) { float2 pin; float2 step; float2 outsz; float2 insz;\n"
++    "                           float2 fuv0; float2 fuv1; float4 key; int keyed; int3 pad; };\n"
++    "struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
++    "V vs(uint id : SV_VertexID) {\n"
++    "    V o; float2 p = float2((id << 1) & 2, id & 2);\n"
++    "    o.uv = p; o.pos = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
++    "    return o;\n"
++    "}\n"
++    "float3 px(int2 p) {\n"
++    "    p = clamp(p, int2(0, 0), int2(insz) - 1);\n"
++    "    float4 q = yuy2.Load(int3(p.x >> 1, p.y, 0));\n"
++    "    float y = 1.164 * (((p.x & 1) ? q.b : q.r) - 0.0625);\n"
++    "    float u = q.g - 0.5, v = q.a - 0.5;\n"
++    "    return saturate(float3(y + 1.596 * v, y - 0.813 * v - 0.391 * u, y + 2.018 * u));\n"
++    "}\n"
++    "float4 ps(V i) : SV_Target {\n"
++    "    if (keyed) {\n"
++    "        float3 f = frame.Sample(sp, lerp(fuv0, fuv1, i.uv)).rgb;\n"
++    "        if (any(abs(f - key.rgb) > 1.5 / 255.0)) discard;\n"
++    "    }\n"
++    "    float2 s = pin + i.uv * outsz * step - 0.5;\n"
++    "    int2 b = (int2)floor(s); float2 t = s - b;\n"
++    "    float3 c = lerp(lerp(px(b), px(b + int2(1, 0)), t.x),\n"
++    "                    lerp(px(b + int2(0, 1)), px(b + int2(1, 1)), t.x), t.y);\n"
++    "    return float4(c, 1);\n"
++    "}\n";
++
++typedef struct {
++    float pin[2], step[2], outsz[2], insz[2], fuv0[2], fuv1[2], key[4];
++    int   keyed, pad[3];
++} PvConsts;
++
++static struct {
++    ID3D11Device             *dev;      /* the device these belong to */
++    ID3D11VertexShader       *vs;
++    ID3D11PixelShader        *ps;
++    ID3D11SamplerState       *smp;
++    ID3D11Buffer             *cb;
++    ID3D11Texture2D          *tex;
++    ID3D11ShaderResourceView *srv;
++    uint32_t                  tw, th;
++    int                       failed;
++    int                       logged;
++} pvd;
++
++#define PV_RELEASE(p) do { if (p) { IUnknown_Release((IUnknown *)(p)); (p) = NULL; } } while (0)
++
++void xbox_PvideoReleaseD3D11(void)
++{
++    PV_RELEASE(pvd.srv); PV_RELEASE(pvd.tex);
++    PV_RELEASE(pvd.cb);  PV_RELEASE(pvd.smp);
++    PV_RELEASE(pvd.ps);  PV_RELEASE(pvd.vs);
++    memset(&pvd, 0, sizeof pvd);
++}
++
++static ID3DBlob *pv_compile(const char *entry, const char *target)
++{
++    ID3DBlob *code = NULL, *err = NULL;
++    if (FAILED(D3DCompile(s_pv_hlsl, sizeof s_pv_hlsl - 1, "pvideo_overlay", NULL, NULL,
++                          entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err))) {
++        fprintf(stderr, "  [PVIDEO] shader %s: %s\n", entry,
++                err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "failed");
++        PV_RELEASE(code);
++    }
++    PV_RELEASE(err);
++    return code;
++}
++
++static int pv_init(ID3D11Device *dev)
++{
++    ID3DBlob *vsb, *psb;
++    D3D11_SAMPLER_DESC smd;
++    D3D11_BUFFER_DESC bd;
++    int ok;
++
++    pvd.dev = dev;
++    vsb = pv_compile("vs", "vs_4_0");
++    psb = pv_compile("ps", "ps_4_0");
++    memset(&smd, 0, sizeof smd);
++    smd.AddressU = smd.AddressV = smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
++    smd.MaxLOD = D3D11_FLOAT32_MAX;
++    memset(&bd, 0, sizeof bd);
++    bd.ByteWidth = sizeof(PvConsts);
++    bd.Usage = D3D11_USAGE_DEFAULT;
++    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++    ok = vsb && psb
++        && SUCCEEDED(ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
++                         ID3D10Blob_GetBufferSize(vsb), NULL, &pvd.vs))
++        && SUCCEEDED(ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
++                         ID3D10Blob_GetBufferSize(psb), NULL, &pvd.ps))
++        && SUCCEEDED(ID3D11Device_CreateSamplerState(dev, &smd, &pvd.smp))
++        && SUCCEEDED(ID3D11Device_CreateBuffer(dev, &bd, NULL, &pvd.cb));
++    PV_RELEASE(vsb);
++    PV_RELEASE(psb);
++    if (!ok) {
++        xbox_PvideoReleaseD3D11();
++        pvd.failed = 1;
++    }
++    return ok;
++}
++
++/* Upload the shown buffer into a texture of its size. */
++static int pv_upload(ID3D11Device *dev, ID3D11DeviceContext *ctx, const PvState *p)
++{
++    D3D11_MAPPED_SUBRESOURCE map;
++    uint32_t tw = (p->in_w + 1) / 2, row;
++
++    if (!pvd.tex || pvd.tw != tw || pvd.th != p->in_h) {
++        D3D11_TEXTURE2D_DESC td;
++        PV_RELEASE(pvd.srv);
++        PV_RELEASE(pvd.tex);
++        memset(&td, 0, sizeof td);
++        td.Width = tw;
++        td.Height = p->in_h;
++        td.MipLevels = 1;
++        td.ArraySize = 1;
++        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++        td.SampleDesc.Count = 1;
++        td.Usage = D3D11_USAGE_DYNAMIC;
++        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++        if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &pvd.tex))
++            || FAILED(ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)pvd.tex,
++                                                            NULL, &pvd.srv))) {
++            PV_RELEASE(pvd.srv);
++            PV_RELEASE(pvd.tex);
++            return 0;
++        }
++        pvd.tw = tw;
++        pvd.th = p->in_h;
++    }
++    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)pvd.tex, 0,
++                                       D3D11_MAP_WRITE_DISCARD, 0, &map)))
++        return 0;
++    for (row = 0; row < p->in_h; row++)
++        memcpy((uint8_t *)map.pData + (size_t)row * map.RowPitch,
++               p->pixels + (size_t)row * p->pitch, (size_t)tw * 4);
++    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)pvd.tex, 0);
++    return 1;
++}
++
++/* Draw the overlay, if one is up, over a frame already drawn at (x, y, w, h)
++ * of the bound render target; frame is that frame's texture, fb_w x fb_h
++ * the guest's frame size. Leaves the pipeline state as it found it. 1 when
++ * something was drawn. */
++int xbox_PvideoDrawD3D11(void *device, void *context, void *frame_srv,
++                         float x, float y, float w, float h,
++                         uint32_t fb_w, uint32_t fb_h)
++{
++    static int enabled = -1;
++    ID3D11Device *dev = (ID3D11Device *)device;
++    ID3D11DeviceContext *ctx = (ID3D11DeviceContext *)context;
++    ID3D11ShaderResourceView *frame = (ID3D11ShaderResourceView *)frame_srv;
++    ID3D11VertexShader *old_vs = NULL;
++    ID3D11PixelShader *old_ps = NULL;
++    ID3D11Buffer *old_cb = NULL;
++    ID3D11SamplerState *old_smp = NULL;
++    ID3D11ShaderResourceView *old_srv[2] = { NULL, NULL }, *srvs[2];
++    D3D11_VIEWPORT old_vp, vp;
++    UINT nvp = 1;
++    PvState p;
++    PvConsts c;
++
++    if (enabled < 0) {
++        const char *v = getenv("RECOMP_PVIDEO");
++        enabled = !(v && *v == '0');
++    }
++    if (!enabled || !fb_w || !fb_h || !pv_state(&p, fb_w, fb_h))
++        return 0;
++    if (pvd.dev != dev) {
++        xbox_PvideoReleaseD3D11();
++        if (!pv_init(dev))
++            return 0;
++    }
++    if (pvd.failed || !pv_upload(dev, ctx, &p))
++        return 0;
++    if (!pvd.logged) {
++        pvd.logged = 1;
++        fprintf(stderr, "  [PVIDEO] showing the video overlay: %ux%u at %u,%u (%ux%u in)\n",
++                p.out_w, p.out_h, p.out_x, p.out_y, p.in_w, p.in_h);
++    }
++
++    memset(&c, 0, sizeof c);
++    c.pin[0] = p.pin_s;  c.pin[1] = p.pin_t;
++    c.step[0] = p.ds;    c.step[1] = p.dt;
++    c.outsz[0] = (float)p.out_w;  c.outsz[1] = (float)p.out_h;
++    c.insz[0] = (float)p.in_w;    c.insz[1] = (float)p.in_h;
++    c.fuv0[0] = (float)p.out_x / (float)fb_w;
++    c.fuv0[1] = (float)p.out_y / (float)fb_h;
++    c.fuv1[0] = (float)(p.out_x + p.out_w) / (float)fb_w;
++    c.fuv1[1] = (float)(p.out_y + p.out_h) / (float)fb_h;
++    c.key[0] = (float)((p.key >> 16) & 255u) / 255.0f;
++    c.key[1] = (float)((p.key >> 8) & 255u) / 255.0f;
++    c.key[2] = (float)(p.key & 255u) / 255.0f;
++    c.keyed = p.keyed && frame;
++    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)pvd.cb, 0, NULL, &c, 0, 0);
++
++    memset(&vp, 0, sizeof vp);
++    vp.TopLeftX = x + (float)p.out_x * w / (float)fb_w;
++    vp.TopLeftY = y + (float)p.out_y * h / (float)fb_h;
++    vp.Width = (float)p.out_w * w / (float)fb_w;
++    vp.Height = (float)p.out_h * h / (float)fb_h;
++    vp.MaxDepth = 1.0f;
++
++    ID3D11DeviceContext_RSGetViewports(ctx, &nvp, &old_vp);
++    ID3D11DeviceContext_VSGetShader(ctx, &old_vs, NULL, NULL);
++    ID3D11DeviceContext_PSGetShader(ctx, &old_ps, NULL, NULL);
++    ID3D11DeviceContext_PSGetConstantBuffers(ctx, 0, 1, &old_cb);
++    ID3D11DeviceContext_PSGetSamplers(ctx, 0, 1, &old_smp);
++    ID3D11DeviceContext_PSGetShaderResources(ctx, 0, 2, old_srv);
++
++    srvs[0] = frame;
++    srvs[1] = pvd.srv;
++    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
++    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
++    ID3D11DeviceContext_VSSetShader(ctx, pvd.vs, NULL, 0);
++    ID3D11DeviceContext_PSSetShader(ctx, pvd.ps, NULL, 0);
++    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &pvd.cb);
++    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &pvd.smp);
++    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 2, srvs);
++    ID3D11DeviceContext_Draw(ctx, 3, 0);
++
++    if (nvp)
++        ID3D11DeviceContext_RSSetViewports(ctx, 1, &old_vp);
++    ID3D11DeviceContext_VSSetShader(ctx, old_vs, NULL, 0);
++    ID3D11DeviceContext_PSSetShader(ctx, old_ps, NULL, 0);
++    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &old_cb);
++    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &old_smp);
++    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 2, old_srv);
++    PV_RELEASE(old_vs); PV_RELEASE(old_ps); PV_RELEASE(old_cb); PV_RELEASE(old_smp);
++    PV_RELEASE(old_srv[0]); PV_RELEASE(old_srv[1]);
++    return 1;
++}
++
++#else  /* !_WIN32: the SDL window does not composite the overlay yet */
++void     xbox_PvideoTrace(void) {}
++uint32_t xbox_PvideoChangeCount(void) { return 0; }
++#endif

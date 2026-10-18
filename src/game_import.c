@@ -29,6 +29,13 @@
 static const char RELEASE[] =
     "Deathrow for the original Xbox, North American release (version 3)";
 
+/* An error, in a box for the player and in the log for a report. */
+static void error_box(const char *msg)
+{
+    fprintf(stderr, "[IMPORT] %s\n", msg);
+    MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+}
+
 static void ini_path(const char *exe_dir, char *out, size_t n)
 {
     snprintf(out, n, "%s\\exonerated.ini", exe_dir);
@@ -82,7 +89,7 @@ static int check_xbe(const void *xbe, size_t size, const char *what)
              "Found:    %s\nExpected: %s",
              what, RELEASE, xbe && found[0] ? found : "(no readable default.xbe)",
              DR_XBE_SHA1);
-    MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+    error_box(msg);
     return 0;
 }
 
@@ -184,10 +191,11 @@ static int import_iso(const char *exe_dir, const char *iso, char *game_dir, size
     int rc;
 
     snprintf(what, sizeof what, "\"%s\"", base ? base + 1 : iso);
+    fprintf(stderr, "[IMPORT] disc image %s\n", iso);
     x = dr_xiso_open(iso, err, sizeof err);
     if (!x) {
         snprintf(msg, sizeof msg, "Could not read %s as an Xbox disc image.\n\n%s", what, err);
-        MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+        error_box(msg);
         return 0;
     }
     xbe = dr_xiso_read_root_file(x, "default.xbe", &xbe_size);
@@ -205,7 +213,7 @@ static int import_iso(const char *exe_dir, const char *iso, char *game_dir, size
                  "Not enough free disk space next to Exonerated to unpack the game.\n\n"
                  "Needed: %.1f GB\nFree:   %.1f GB",
                  (double)total / 1073741824.0, (double)free_bytes.QuadPart / 1073741824.0);
-        MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+        error_box(msg);
         dr_xiso_close(x);
         return 0;
     }
@@ -219,7 +227,7 @@ static int import_iso(const char *exe_dir, const char *iso, char *game_dir, size
     if (rc != 0) {
         if (!p.cancel) {
             snprintf(msg, sizeof msg, "Copying the game stopped.\n\n%s", err);
-            MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+            error_box(msg);
         }
         return 0;
     }
@@ -229,7 +237,7 @@ static int import_iso(const char *exe_dir, const char *iso, char *game_dir, size
                  "The game was unpacked to\n%s\nbut could not be renamed to \"game\" "
                  "(error %lu). Is there already a \"game\" folder? Rename it, then "
                  "start Exonerated again.", partial, GetLastError());
-        MessageBoxA(NULL, msg, TITLE, MB_ICONERROR);
+        error_box(msg);
         return 0;
     }
     snprintf(game_dir, n, "%s", dest);

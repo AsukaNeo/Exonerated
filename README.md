@@ -23,22 +23,24 @@
 ## Status
 
 - ✅ Full matches, menus, audio, controller with rumble, keyboard
+- ✅ GPU renderer (Direct3D 11) at up to 4x the Xbox's resolution, in the game's own 16:9 mode
+- ✅ The game's movies, in the game window: the intros, the attract loop, the clip in the game-mode menu
 - ✅ Scalable window, borderless fullscreen, in-game settings overlay
-- 🚧 Software rendering, roughly 20–60 fps in a match; a GPU renderer is in progress
+- 🚧 Game speed: paced at 30 frames per second for now (the game ran too fast at 60)
 - 🚧 Some texture glitches, including a striped backdrop on the pre-match loading screen
 - ⛔ No online or System Link play, and none planned
 
 ## What you need
 
 - *Deathrow* for the original Xbox, **North American release** (version 3), as a disc image (`.iso`) or its files (`default.xbe` and the `data` folder)
-- Windows 10 or 11, 64-bit
+- Windows 10 or 11, 64-bit, and a graphics card with Direct3D 11
 
 ## Download and play
 
 *From the beta onward, once releases are published:*
 
 1. Download the latest `Exonerated-…-windows-x64.zip` from [Releases](https://github.com/AsukaNeo/Exonerated/releases) and unzip it anywhere.
-2. Double-click **`Exonerated.exe`** and choose your Deathrow disc image (`.iso`), or the `default.xbe` from its files. Exonerated checks it's the supported release and sets the game up next to itself, once.
+2. Double-click **`Exonerated.exe`** and choose your Deathrow disc image (`.iso`), or the `default.xbe` from its files. Exonerated checks it's the supported release and copies the game, movies included, into a `game` folder next to itself, once.
 3. Play.
 
 ## Build it yourself

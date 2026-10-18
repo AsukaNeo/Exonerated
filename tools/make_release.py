@@ -28,8 +28,14 @@ TOOLKIT = os.path.abspath(os.path.join(ROOT, "..", "xboxrecomp"))
 BUILD = os.path.join(ROOT, "build-release")
 DIST = os.path.join(ROOT, "dist")
 
-DEFAULT_INI = """; Exonerated settings. The F10 overlay changes these and can save them.
+DEFAULT_INI = """; Exonerated settings. F10 (or Back+Start on a controller) opens the
+; settings overlay, which changes these and can save them.
 [display]
+; renderer: gpu (Direct3D 11) or software. render_scale (1-4, x 640x480)
+; and widescreen (1 = 16:9) take effect at the next start.
+renderer=gpu
+render_scale=2
+widescreen=1
 vsync=1
 filter=sharp
 scale=fit

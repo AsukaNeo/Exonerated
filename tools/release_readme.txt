@@ -10,15 +10,24 @@ WHAT YOU NEED
   - Your own copy of Deathrow for the original Xbox, North American release
     (version 3): its disc image (.iso), or its files (default.xbe and the
     data folder). Nothing from the game is included in this download.
-  - Windows 10 or 11, 64-bit.
+  - Windows 10 or 11, 64-bit, and a graphics card with Direct3D 11.
 
 FIRST START
   1. Unzip this folder anywhere you like.
   2. Double-click Exonerated.exe.
   3. Choose your Deathrow disc image (.iso), or the default.xbe from its files.
      Exonerated checks that it is the supported release, then copies the game
-     into a "game" folder here. This happens only once (about 1.1 GB).
-  You can also drag the .iso onto Exonerated.exe.
+     into a "game" folder here, movies and all. This happens only once
+     (about 1.1 GB).
+  You can also drag the .iso onto Exonerated.exe. Everything then lives in
+  this one folder: Exonerated.exe, exonerated.ini and game.
+
+PICTURE
+  The game draws on your graphics card at twice the Xbox's resolution
+  (1280x960), in its own 16:9 widescreen mode, and its movies play in the
+  same window. Change Renderer, Render resolution (1x-4x) or Widescreen in
+  the F10 overlay, then Save settings and restart. If the picture is wrong
+  on your graphics card, set renderer=software in exonerated.ini.
 
 CONTROLS
   Any Xbox-style controller works as player 1. Keyboard: Enter = Start,

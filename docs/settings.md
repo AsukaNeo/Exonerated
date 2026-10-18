@@ -2,7 +2,7 @@
 
 ## Settings overlay
 
-Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Render resolution** and **Widescreen** take effect the next time you start the game, after Save settings.
+Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer**, **Render resolution** and **Widescreen** take effect the next time you start the game, after Save settings.
 
 Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The game keeps running underneath, but it ignores your inputs while the overlay is open.
 
@@ -20,6 +20,8 @@ Read from the folder you run from, or beside the exe. An environment variable of
 
 ```ini
 [display]
+renderer=gpu       ; gpu (default: Direct3D 11) or software (the CPU rasteriser);
+                   ;   RECOMP_PB_BACKEND=d3d11 or cpu overrides it
 vsync=1            ; RECOMP_VSYNC: 0 to turn it off
 filter=sharp       ; RECOMP_FILTER: sharp (crisp at any size), bilinear, nearest
 scale=fit          ; RECOMP_SCALE: fit (4:3 with black bars), integer, stretch
@@ -28,9 +30,11 @@ window_scale=2     ; RECOMP_WINDOW_SCALE: starting window size, times 640×480
 present=d3d11      ; RECOMP_PRESENT: gdi for the plain fallback
 fps_counter=0      ; RECOMP_FPS_COUNTER: 1 for the on-screen FPS counter
 render_scale=1     ; RECOMP_RENDER_SCALE: 1-4, draw at that multiple of 640×480
-                   ;   (GPU renderer only, RECOMP_PB_BACKEND=d3d11)
+                   ;   (GPU renderer only; the release's ini starts at 2)
 widescreen=0       ; RECOMP_WIDESCREEN: 1 for the game's own 16:9 mode,
-                   ;   shown 16:9 (the HUD is the game's own widescreen layout)
+                   ;   shown 16:9 (the HUD is the game's own widescreen layout;
+                   ;   the movies stretch, as on a 16:9 TV). The release's ini
+                   ;   starts at 1
 
 [input]
 rumble=1           ; RECOMP_RUMBLE: 0 to turn it off
