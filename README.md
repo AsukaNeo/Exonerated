@@ -7,14 +7,14 @@
 </p>
 
 <p align="center">
-  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-orange">
+  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-red">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
   <img alt="Original: Xbox" src="https://img.shields.io/badge/original-Xbox-107C10">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
-> [!NOTE]
-> **Beta.** Full matches play from start to finish. Expect some graphics glitches, and please [report problems](https://github.com/AsukaNeo/Exonerated/issues).
+> [!WARNING]
+> **Pre-alpha.** Full matches play from start to finish, but there is no download yet: you build it from your own copy of the game. The first public download, a beta, comes with the GPU renderer.
 
 ## About
 
@@ -34,6 +34,8 @@
 - Windows 10 or 11, 64-bit
 
 ## Download and play
+
+*From the beta onward, once releases are published:*
 
 1. Download the latest `Exonerated-…-windows-x64.zip` from [Releases](https://github.com/AsukaNeo/Exonerated/releases) and unzip it anywhere.
 2. Double-click **`Exonerated.exe`** and choose your Deathrow disc image (`.iso`), or the `default.xbe` from its files. Exonerated checks it's the supported release and sets the game up next to itself, once.
