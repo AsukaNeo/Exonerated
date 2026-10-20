@@ -7,14 +7,14 @@
 </p>
 
 <p align="center">
-  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-red">
+  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
   <img alt="Original: Xbox" src="https://img.shields.io/badge/original-Xbox-107C10">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
-> [!WARNING]
-> **Pre-alpha.** Full matches play from start to finish, but there is no download yet: you build it from your own copy of the game. The first public download, a beta, comes with the GPU renderer.
+> [!NOTE]
+> **Beta.** Full matches play from start to finish on the GPU renderer. Expect some graphics glitches, and please [report problems](https://github.com/AsukaNeo/Exonerated/issues).
 
 ## About
 
@@ -26,7 +26,7 @@
 - ✅ GPU renderer (Direct3D 11) at up to 4x the Xbox's resolution, in the game's own 16:9 mode
 - ✅ The game's movies, in the game window: the intros, the attract loop, the clip in the game-mode menu
 - ✅ Title card with settings before you play; scalable window, borderless fullscreen, in-game settings overlay
-- 🚧 Game speed: paced at 30 frames per second for now (the game ran too fast at 60)
+- ✅ Game speed as on the Xbox (30 frames a second in a match, 60 in menus), with optional frame generation up to your display's refresh rate
 - 🚧 Some texture glitches, including a striped backdrop on the pre-match loading screen
 - ⛔ No online or System Link play, and none planned
 
@@ -37,11 +37,9 @@
 
 ## Download and play
 
-*From the beta onward, once releases are published:*
-
 1. Download the latest `Exonerated-…-windows-x64.zip` from [Releases](https://github.com/AsukaNeo/Exonerated/releases) and unzip it anywhere.
 2. Double-click **`Exonerated.exe`** and choose your Deathrow disc image (`.iso`), or the `default.xbe` from its files. Exonerated checks it's the supported release and copies the game, movies included, into a `game` folder next to itself, once.
-3. Play.
+3. The title card opens: **Play**, **Settings** or **Exit to Windows**.
 
 ## Build it yourself
 

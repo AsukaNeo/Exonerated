@@ -12144,10 +12144,10 @@ index 4e86a08..8b2fee2 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..6f91a94 100644
+index b26edfe..2c99242 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -7,20 +7,75 @@
+@@ -7,20 +7,84 @@
   * implemented, none of it is observable. This is the other half: a window that
   * reads that memory and puts it on screen.
   *
@@ -12194,6 +12194,14 @@ index b26edfe..6f91a94 100644
 + *                                      present, D3D11 presenter only
 + *   RECOMP_FXAA          fxaa          0 (default) or 1: FXAA at present,
 + *                                      D3D11 presenter only
++ *   RECOMP_FRAME_GEN     frame_gen     off (default), blend or motion: show
++ *                                      the GPU back end's frames at the
++ *                                      display's refresh rate, with frames
++ *                                      made between each two the game drew
++ *                                      (crossfaded, or moved along motion
++ *                                      found on the GPU). One game frame
++ *                                      later on screen; turns vsync on.
++ *                                      D3D11 presenter and GPU renderer.
 + *   RECOMP_WINDOW_TITLE  title         title bar prefix (RECOMP_APP_NAME)
 + *
 + * Keys: Alt+Enter or F11 toggles borderless fullscreen; F12 saves the frame
@@ -12214,6 +12222,7 @@ index b26edfe..6f91a94 100644
  #include <stdlib.h>
  #include <string.h>
 +#include <ctype.h>
++#include <math.h>
 +#pragma comment(lib, "d3d11.lib")
 +#pragma comment(lib, "dxgi.lib")
 +#pragma comment(lib, "dxguid.lib")
@@ -12227,7 +12236,7 @@ index b26edfe..6f91a94 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -34,6 +89,12 @@
+@@ -34,6 +98,12 @@
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
  static volatile LONG s_fb_running;
@@ -12240,7 +12249,7 @@ index b26edfe..6f91a94 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -51,6 +112,48 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -51,6 +121,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -12252,6 +12261,7 @@ index b26edfe..6f91a94 100644
 +static void *volatile s_gpu_handle;
 +static volatile LONG  s_gpu_w, s_gpu_h, s_gpu_gen;
 +static volatile LONG  s_gpu_mark, s_present_gpu;
++static volatile LONG64 s_gpu_qpc;      /* and its QueryPerformanceCounter, for frame generation */
 +
 +void xbox_FramebufferWindowSetGpuFrame(void *handle, uint32_t width, uint32_t height)
 +{
@@ -12263,6 +12273,9 @@ index b26edfe..6f91a94 100644
 +
 +void xbox_FramebufferWindowGpuFrameReady(void)
 +{
++    LARGE_INTEGER now;
++    QueryPerformanceCounter(&now);
++    InterlockedExchange64(&s_gpu_qpc, now.QuadPart);
 +    InterlockedExchange(&s_gpu_mark, 1);
 +}
 +
@@ -12289,7 +12302,7 @@ index b26edfe..6f91a94 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -120,6 +223,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -120,6 +236,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -12297,7 +12310,7 @@ index b26edfe..6f91a94 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -145,16 +249,335 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -145,16 +262,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12305,6 +12318,12 @@ index b26edfe..6f91a94 100644
 +
 +enum { FILTER_NEAREST, FILTER_BILINEAR, FILTER_SHARP };
 +enum { SCALE_FIT, SCALE_INTEGER, SCALE_STRETCH };
++enum { FG_OFF, FG_BLEND, FG_MOTION };
++
++static const char *frame_gen_name(int f)
++{
++    return f == FG_MOTION ? "motion" : f == FG_BLEND ? "blend" : "off";
++}
 +
 +static struct {
 +    int  vsync, filter, scale, fullscreen, window_scale, gdi, fps_counter;
@@ -12315,6 +12334,7 @@ index b26edfe..6f91a94 100644
 +    int  anisotropy;        /* GPU back end texture filtering floor: 0 (title's), 2-16 */
 +    int  sharpen;           /* present-time CAS strength, 0 (off) to 100 */
 +    int  fxaa;              /* present-time FXAA */
++    int  frame_gen;         /* FG_OFF, FG_BLEND or FG_MOTION */
 +    char title[64];
 +    char app[32];          /* RECOMP_APP_NAME, lowercased: ini and file names */
 +} s_cfg;
@@ -12495,8 +12515,11 @@ index b26edfe..6f91a94 100644
 +    if (s_cfg.sharpen < 0) s_cfg.sharpen = 0;
 +    if (s_cfg.sharpen > 100) s_cfg.sharpen = 100;
 +    s_cfg.fxaa = cfg_int("RECOMP_FXAA", "fxaa", 0) != 0;
-+    fprintf(stderr, "  [FBWIN] image: anisotropy %d sharpen %d fxaa %d\n",
-+            s_cfg.anisotropy, s_cfg.sharpen, s_cfg.fxaa);
++    cfg_str("RECOMP_FRAME_GEN", "frame_gen", "off", buf, sizeof buf);
++    s_cfg.frame_gen = !_stricmp(buf, "motion") || !strcmp(buf, "2") ? FG_MOTION
++                    : !_stricmp(buf, "blend") || !strcmp(buf, "1") ? FG_BLEND : FG_OFF;
++    fprintf(stderr, "  [FBWIN] image: anisotropy %d sharpen %d fxaa %d frame_gen %s\n",
++            s_cfg.anisotropy, s_cfg.sharpen, s_cfg.fxaa, frame_gen_name(s_cfg.frame_gen));
 +    /* The back end is chosen by RECOMP_PB_BACKEND, which the title's own
 +     * start-up may have set from this same key; shown and saved here as
 +     * gpu or software. */
@@ -12633,7 +12656,7 @@ index b26edfe..6f91a94 100644
          xbox_InputKeySet((int)w, 1);
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
-@@ -183,6 +606,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -183,6 +629,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -12651,7 +12674,7 @@ index b26edfe..6f91a94 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -268,15 +702,1598 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -268,15 +725,2088 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -12667,7 +12690,7 @@ index b26edfe..6f91a94 100644
 + * anti-aliased text at the window's own resolution -- then blended over the
 + * frame by the D3D11 presenter, or copied over it opaque by the GDI one. */
 +enum { OV_FULLSCREEN, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
-+       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FPS,
++       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FRAMEGEN, OV_FPS,
 +       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
 +       OV_PLAY, OV_SETTINGS, OV_BACK, OV_ITEMS };
 +#define OV_MAX_ROWS 24
@@ -12790,7 +12813,7 @@ index b26edfe..6f91a94 100644
 +    static const char *const labels[OV_ITEMS] = {
 +        "Fullscreen", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
 +        "Widescreen (16:9)", "Anisotropic filtering", "Sharpening", "FXAA",
-+        "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
++        "Frame generation", "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
 +        "Save settings", "Restart now to apply", "Exit to Windows", "Close",
 +        "Play", "Settings", "Back"
 +    };
@@ -12834,7 +12857,12 @@ index b26edfe..6f91a94 100644
 +        else               snprintf(value, n, "Off");
 +        break;
 +    case OV_FXAA:      snprintf(value, n, "%s", s_cfg.fxaa ? "On" : "Off"); break;
-+    case OV_FPS:       snprintf(value, n, "%s", s_cfg.fps_counter ? "On" : "Off"); break;
++    case OV_FRAMEGEN:
++        snprintf(value, n, "%s%s", s_cfg.frame_gen == FG_MOTION ? "Motion"
++                 : s_cfg.frame_gen == FG_BLEND ? "Blend" : "Off",
++                 s_cfg.frame_gen && !s_cfg.gpu ? " (GPU renderer only)" : "");
++        break;
++    case OV_FPS:      snprintf(value, n, "%s", s_cfg.fps_counter ? "On" : "Off"); break;
 +    case OV_RUMBLE:     snprintf(value, n, "%s", xbox_InputGetRumble() ? "On" : "Off"); break;
 +    case OV_DEADZONE: {
 +        int dz = xbox_InputGetDeadZone();
@@ -12879,6 +12907,7 @@ index b26edfe..6f91a94 100644
 +    snprintf(v, sizeof v, "%d", s_cfg.sharpen);
 +    ok &= WritePrivateProfileStringA("display", "sharpen", v, s_ini);
 +    ok &= WritePrivateProfileStringA("display", "fxaa", s_cfg.fxaa ? "1" : "0", s_ini);
++    ok &= WritePrivateProfileStringA("display", "frame_gen", frame_gen_name(s_cfg.frame_gen), s_ini);
 +    ok &= WritePrivateProfileStringA("input", "rumble", xbox_InputGetRumble() ? "1" : "0", s_ini);
 +    snprintf(v, sizeof v, "%d", xbox_InputGetDeadZone());
 +    ok &= WritePrivateProfileStringA("input", "deadzone", v, s_ini);
@@ -12993,6 +13022,7 @@ index b26edfe..6f91a94 100644
 +        if (s_cfg.sharpen > 100) s_cfg.sharpen = 100;
 +        break;
 +    case OV_FXAA:      s_cfg.fxaa = !s_cfg.fxaa; break;
++    case OV_FRAMEGEN:  s_cfg.frame_gen = (s_cfg.frame_gen + 3 + dir) % 3; break;
 +    case OV_FPS:       s_cfg.fps_counter = !s_cfg.fps_counter; break;
 +    case OV_RUMBLE:     xbox_InputSetRumble(!xbox_InputGetRumble()); break;
 +    case OV_DEADZONE:
@@ -13672,6 +13702,96 @@ index b26edfe..6f91a94 100644
 +    "    return float4(t.SampleLevel(sl, uv, 0).rgb, 1);\n" \
 +    "}\n"
 +
++/* Frame generation (written for this file). Frames A (t) and B (tb) are two
++ * the game drew; the frame shown at a time between them, ft of the way from
++ * A to B, is a crossfade (fg_interp, fmode 1) or each pixel fetched from
++ * where it was in A and where it will be in B along a motion vector
++ * (fmode 2), crossfading back where those two disagree (occlusion, a wrong
++ * vector).
++ *
++ * Motion is found once per pair on a luma pyramid at half the guest's size
++ * and three halvings below it (la, lb: this level's A and B). The search is
++ * symmetric about the in-between frame: a vector v at p pairs A at p - v/2
++ * with B at p + v/2, so every pixel of the frame to be made gets a vector and
++ * nothing has to be splatted forward. The coarsest level tries every vector
++ * within 4 of its pixels (32 guest pixels a frame at the top); each finer
++ * level starts from the doubled vectors of the pixel above and its four
++ * neighbours, then steps 1 and 0.5 around the best. The cost is the mean
++ * absolute luma difference over 5x5, plus a little for straying from the
++ * vector above (smoothness), less a little for no motion at all (the HUD,
++ * still scenes). */
++#define FB_FG_HLSL \
++    "Texture2D tb : register(t2);\n" \
++    "Texture2D vf : register(t3);\n" \
++    "Texture2D la : register(t4);\n" \
++    "Texture2D lb : register(t5);\n" \
++    "cbuffer G : register(b1) { float2 lsize; float2 csize; float ft; float fmode; float2 fpad; };\n" \
++    "float4 fg_lum0(V i) : SV_Target {\n" \
++    "    float2 r = 1.0 / lsize, uv = i.pos.xy * r;\n" \
++    "    float l = 0;\n" \
++    "    [unroll] for (int y = 0; y < 4; y++) [unroll] for (int x = 0; x < 4; x++)\n" \
++    "        l += luma(t.SampleLevel(sl, uv + (float2(x, y) - 1.5) * 0.25 * r, 0).rgb);\n" \
++    "    return l / 16.0;\n" \
++    "}\n" \
++    "float4 fg_lumd(V i) : SV_Target { return la.SampleLevel(sl, i.pos.xy / lsize, 0).r; }\n" \
++    "float fg_sad(float2 p, float2 v) {\n" \
++    "    float2 r = 1.0 / lsize, ua = (p - 0.5 * v) * r, ub = (p + 0.5 * v) * r;\n" \
++    "    float s = 0;\n" \
++    "    [unroll] for (int y = -2; y <= 2; y++) [unroll] for (int x = -2; x <= 2; x++) {\n" \
++    "        float2 o = float2(x, y) * r;\n" \
++    "        s += abs(la.SampleLevel(sl, ua + o, 0).r - lb.SampleLevel(sl, ub + o, 0).r);\n" \
++    "    }\n" \
++    "    return s * 0.04;\n" \
++    "}\n" \
++    "float fg_cost(float2 p, float2 v, float2 pv) {\n" \
++    "    float2 d = abs(v - pv);\n" \
++    "    return fg_sad(p, v) + 0.002 * (d.x + d.y) - (all(v == 0) ? 0.004 : 0.0);\n" \
++    "}\n" \
++    "float4 fg_search(V i) : SV_Target {\n" \
++    "    float2 p = i.pos.xy, best = 0;\n" \
++    "    float bc = fg_cost(p, 0, 0);\n" \
++    "    [loop] for (int y = -4; y <= 4; y++) [loop] for (int x = -4; x <= 4; x++) {\n" \
++    "        float c = fg_cost(p, float2(x, y), 0);\n" \
++    "        if (c < bc) { bc = c; best = float2(x, y); }\n" \
++    "    }\n" \
++    "    return float4(best, bc, 0);\n" \
++    "}\n" \
++    "float4 fg_refine(V i) : SV_Target {\n" \
++    "    float2 p = i.pos.xy;\n" \
++    "    int2 c = int2(p * 0.5), m = int2(csize) - 1;\n" \
++    "    float2 pv = 2.0 * vf.Load(int3(clamp(c, 0, m), 0)).xy, best = 0;\n" \
++    "    float bc = fg_cost(p, 0, pv);\n" \
++    "    [loop] for (int k = 0; k < 5; k++) {\n" \
++    "        int2 o = k == 1 ? int2(-1, 0) : k == 2 ? int2(1, 0) : k == 3 ? int2(0, -1) : k == 4 ? int2(0, 1) : int2(0, 0);\n" \
++    "        float2 v = 2.0 * vf.Load(int3(clamp(c + o, 0, m), 0)).xy;\n" \
++    "        float cc = fg_cost(p, v, pv);\n" \
++    "        if (cc < bc) { bc = cc; best = v; }\n" \
++    "    }\n" \
++    "    [loop] for (int s = 0; s < 2; s++) {\n" \
++    "        float2 at0 = best;\n" \
++    "        float st = s == 0 ? 1.0 : 0.5;\n" \
++    "        [loop] for (int k = 0; k < 9; k++) {\n" \
++    "            if (k == 4) continue;\n" \
++    "            float2 v = at0 + st * float2(k % 3 - 1, k / 3 - 1);\n" \
++    "            float cc = fg_cost(p, v, pv);\n" \
++    "            if (cc < bc) { bc = cc; best = v; }\n" \
++    "        }\n" \
++    "    }\n" \
++    "    return float4(best, bc, 0);\n" \
++    "}\n" \
++    "float4 fg_interp(V i) : SV_Target {\n" \
++    "    float2 uv = i.uv;\n" \
++    "    float3 a0 = t.SampleLevel(sl, uv, 0).rgb, b0 = tb.SampleLevel(sl, uv, 0).rgb;\n" \
++    "    float3 bl = lerp(a0, b0, ft);\n" \
++    "    if (fmode < 1.5) return float4(bl, 1);\n" \
++    "    float2 v = vf.SampleLevel(sl, uv, 0).xy / lsize;\n" \
++    "    float3 a = t.SampleLevel(sl, uv - ft * v, 0).rgb;\n" \
++    "    float3 b = tb.SampleLevel(sl, uv + (1.0 - ft) * v, 0).rgb;\n" \
++    "    float3 d = abs(a - b);\n" \
++    "    float w = saturate(1.5 - 8.0 * max(d.r, max(d.g, d.b)));\n" \
++    "    return float4(lerp(bl, lerp(a, b, ft), w), 1);\n" \
++    "}\n"
++
 +/* One full-screen triangle sampling the frame. Sharp bilinear is nearest
 + * neighbour to the largest whole multiple that fits, then bilinear for the
 + * remainder: pixels stay square-edged at any window size without the uneven
@@ -13704,7 +13824,8 @@ index b26edfe..6f91a94 100644
 +    "}\n"
 +    "Texture2D to : register(t1);\n"
 +    "float4 pso(V i) : SV_Target { return to.Sample(sp, i.uv); }\n"
-+    FB_POST_HLSL;
++    FB_POST_HLSL
++    FB_FG_HLSL;
 +
 +typedef struct { float src[2], scale[2]; int mode; float sharp, pad[2]; } FbConsts;
 +
@@ -13812,6 +13933,10 @@ index b26edfe..6f91a94 100644
 +    return src;
 +}
 +
++static void fg_push(void);
++static void fg_free(void);
++static ID3DBlob *d3d_compile(const char *entry, const char *target);
++
 +static void d3d_release(void)
 +{
 +    if (d3d.ctx)
@@ -13827,6 +13952,7 @@ index b26edfe..6f91a94 100644
 +    SAFE_RELEASE(d3d.g_srv); SAFE_RELEASE(d3d.g_tex);
 +    SAFE_RELEASE(d3d.g_mutex); SAFE_RELEASE(d3d.g_shared);
 +    d3d.g_gen = 0; d3d.g_have = 0;
++    fg_free();
 +    xbox_PvideoReleaseD3D11();
 +    SAFE_RELEASE(d3d.sc);  SAFE_RELEASE(d3d.ctx); SAFE_RELEASE(d3d.dev);
 +}
@@ -13877,8 +14003,366 @@ index b26edfe..6f91a94 100644
 +                                         (ID3D11Resource *)d3d.g_shared);
 +        IDXGIKeyedMutex_ReleaseSync(d3d.g_mutex, 0);
 +        d3d.g_have = 1;
++        if (s_cfg.frame_gen)
++            fg_push();
 +    }
 +    return d3d.g_have;
++}
++
++/* ---- frame generation ---------------------------------------------------- */
++
++/* The game's frames come at 30 a second in a match and 60 in the menus (the
++ * title's presentation interval, paced by the kernel's 60 Hz vblank); a
++ * 144 Hz display shows each 30 Hz frame for 4 or 5 refreshes, unevenly. With
++ * frame_gen on, the window presents at every refresh instead, showing the
++ * game's frames one frame late and, in between, frames made from the two on
++ * either side of that moment (FB_FG_HLSL). The game itself is untouched: it
++ * runs at the same rate, this thread only shows what it already drew.
++ *
++ * Each GPU frame taken is copied into a ring of FG_SLOTS with the time the
++ * back end finished it, smoothed: those come a few ms after the guest's
++ * vblank with some scatter, and the scatter would show as uneven motion. The
++ * frame shown at time T = now - (frame interval + FG margin) lies between
++ * the newest frame at or before T (A) and the next (B). The margin covers a
++ * frame that is a little late; one that is later still is waited for on A. */
++#define FG_SLOTS  4
++#define FG_LEVELS 4
++
++typedef struct { float lsize[2], csize[2], ft, fmode, pad[2]; } FgConsts;
++
++static struct {
++    ID3D11PixelShader *ps_lum0, *ps_lumd, *ps_search, *ps_refine, *ps_interp;
++    ID3D11Buffer      *cb;
++    int                ok;                  /* the shaders built */
++    UINT               w, h;                /* the frames' size */
++    UINT               lw[FG_LEVELS], lh[FG_LEVELS];
++    struct {
++        ID3D11Texture2D          *tex;
++        ID3D11ShaderResourceView *srv;
++        ID3D11Texture2D          *lt[FG_LEVELS];
++        ID3D11RenderTargetView   *lrtv[FG_LEVELS];
++        ID3D11ShaderResourceView *lsrv[FG_LEVELS];
++        double                    t;        /* smoothed time, seconds */
++        LONG                      seq;      /* 0: empty */
++    } slot[FG_SLOTS];
++    ID3D11Texture2D          *vt[FG_LEVELS];   /* motion, one level each */
++    ID3D11RenderTargetView   *vrtv[FG_LEVELS];
++    ID3D11ShaderResourceView *vsrv[FG_LEVELS];
++    ID3D11Texture2D          *out;              /* the frame made */
++    ID3D11RenderTargetView   *out_rtv;
++    ID3D11ShaderResourceView *out_srv;
++    LONG     seq;                 /* frames taken */
++    LONG     va, vb;              /* the pair the motion is for */
++    double   qpf;                 /* QueryPerformanceFrequency */
++    double   last_raw, last_t;    /* the newest frame: as stamped, as smoothed */
++    double   interval;            /* average time between frames */
++    double   step;                /* interval, to a whole number of 60 Hz vblanks */
++    double   margin;              /* RECOMP_FRAME_GEN_MS, in seconds */
++    double   last_present, period;  /* the display's refresh period, measured */
++    LONG64   made, held;          /* frames made, and waits for a late frame */
++} fg;
++
++static double fg_now(void)
++{
++    LARGE_INTEGER c;
++    QueryPerformanceCounter(&c);
++    return (double)c.QuadPart / fg.qpf;
++}
++
++static void fg_free_frames(void)
++{
++    int i, l;
++    for (i = 0; i < FG_SLOTS; i++) {
++        SAFE_RELEASE(fg.slot[i].srv); SAFE_RELEASE(fg.slot[i].tex);
++        for (l = 0; l < FG_LEVELS; l++) {
++            SAFE_RELEASE(fg.slot[i].lsrv[l]); SAFE_RELEASE(fg.slot[i].lrtv[l]);
++            SAFE_RELEASE(fg.slot[i].lt[l]);
++        }
++        fg.slot[i].seq = 0;
++    }
++    for (l = 0; l < FG_LEVELS; l++) {
++        SAFE_RELEASE(fg.vsrv[l]); SAFE_RELEASE(fg.vrtv[l]); SAFE_RELEASE(fg.vt[l]);
++    }
++    SAFE_RELEASE(fg.out_srv); SAFE_RELEASE(fg.out_rtv); SAFE_RELEASE(fg.out);
++    fg.w = fg.h = 0;
++    fg.va = fg.vb = 0;
++    fg.last_raw = 0;
++}
++
++static void fg_free(void)
++{
++    fg_free_frames();
++    SAFE_RELEASE(fg.ps_lum0); SAFE_RELEASE(fg.ps_lumd); SAFE_RELEASE(fg.ps_search);
++    SAFE_RELEASE(fg.ps_refine); SAFE_RELEASE(fg.ps_interp); SAFE_RELEASE(fg.cb);
++    fg.ok = 0;
++}
++
++/* A render target with a view of each kind; 0 if any part failed. */
++static int fg_target(UINT w, UINT h, DXGI_FORMAT f, ID3D11Texture2D **tex,
++                     ID3D11RenderTargetView **rtv, ID3D11ShaderResourceView **srv)
++{
++    D3D11_TEXTURE2D_DESC td;
++    memset(&td, 0, sizeof td);
++    td.Width = w;
++    td.Height = h;
++    td.MipLevels = 1;
++    td.ArraySize = 1;
++    td.Format = f;
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_DEFAULT;
++    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (rtv ? D3D11_BIND_RENDER_TARGET : 0);
++    return SUCCEEDED(ID3D11Device_CreateTexture2D(d3d.dev, &td, NULL, tex))
++        && (!rtv || SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d.dev,
++                                  (ID3D11Resource *)*tex, NULL, rtv)))
++        && SUCCEEDED(ID3D11Device_CreateShaderResourceView(d3d.dev,
++                         (ID3D11Resource *)*tex, NULL, srv));
++}
++
++/* The ring and pyramids for w x h frames, the pyramid's base half the
++ * guest's size whatever the render scale. */
++static int fg_alloc(UINT w, UINT h)
++{
++    UINT k = s_fb_width ? (2 * w + s_fb_width / 2) / s_fb_width : 2;
++    int i, l, ok = 1;
++
++    fg_free_frames();
++    if (k < 1) k = 1;
++    fg.lw[0] = w / k > 8 ? w / k : 8;
++    fg.lh[0] = h / k > 8 ? h / k : 8;
++    for (l = 1; l < FG_LEVELS; l++) {
++        fg.lw[l] = (fg.lw[l - 1] + 1) / 2;
++        fg.lh[l] = (fg.lh[l - 1] + 1) / 2;
++    }
++    for (i = 0; ok && i < FG_SLOTS; i++) {
++        ok = fg_target(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, &fg.slot[i].tex, NULL, &fg.slot[i].srv);
++        for (l = 0; ok && l < FG_LEVELS; l++)
++            ok = fg_target(fg.lw[l], fg.lh[l], DXGI_FORMAT_R8_UNORM, &fg.slot[i].lt[l],
++                           &fg.slot[i].lrtv[l], &fg.slot[i].lsrv[l]);
++    }
++    for (l = 0; ok && l < FG_LEVELS; l++)
++        ok = fg_target(fg.lw[l], fg.lh[l], DXGI_FORMAT_R16G16_FLOAT, &fg.vt[l],
++                       &fg.vrtv[l], &fg.vsrv[l]);
++    ok = ok && fg_target(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, &fg.out, &fg.out_rtv, &fg.out_srv);
++    if (!ok) {
++        fprintf(stderr, "  [FBWIN] frame generation: no memory for %ux%u frames\n", w, h);
++        fg_free_frames();
++        return 0;
++    }
++    fg.w = w;
++    fg.h = h;
++    fprintf(stderr, "  [FBWIN] frame generation: %ux%u frames, motion at %ux%u\n",
++            w, h, fg.lw[0], fg.lh[0]);
++    return 1;
++}
++
++/* One full-screen pass into a w x h target. t0, t2-t5 as FB_FG_HLSL names
++ * them; the vertex shader, samplers and constant buffers are bound. */
++static void fg_pass(ID3D11PixelShader *ps, ID3D11RenderTargetView *rtv, UINT w, UINT h,
++                    ID3D11ShaderResourceView *frame_a, ID3D11ShaderResourceView *frame_b,
++                    ID3D11ShaderResourceView *vectors, ID3D11ShaderResourceView *luma_a,
++                    ID3D11ShaderResourceView *luma_b, UINT cw, UINT ch, float ft)
++{
++    static ID3D11ShaderResourceView *const none[6];
++    ID3D11ShaderResourceView *srv[6];
++    D3D11_VIEWPORT vp;
++    FgConsts c;
++
++    memset(&c, 0, sizeof c);
++    c.lsize[0] = (float)w;  c.lsize[1] = (float)h;
++    c.csize[0] = (float)cw; c.csize[1] = (float)ch;
++    c.ft = ft;
++    c.fmode = vectors && s_cfg.frame_gen == FG_MOTION ? 2.0f : 1.0f;
++    if (ps == fg.ps_interp) {                  /* motion is in level-0 pixels */
++        c.lsize[0] = (float)fg.lw[0]; c.lsize[1] = (float)fg.lh[0];
++    }
++    ID3D11DeviceContext_UpdateSubresource(d3d.ctx, (ID3D11Resource *)fg.cb, 0, NULL, &c, 0, 0);
++    memset(&vp, 0, sizeof vp);
++    vp.Width = (float)w;
++    vp.Height = (float)h;
++    vp.MaxDepth = 1.0f;
++    srv[0] = frame_a; srv[1] = NULL; srv[2] = frame_b;
++    srv[3] = vectors; srv[4] = luma_a; srv[5] = luma_b;
++    ID3D11DeviceContext_PSSetShaderResources(d3d.ctx, 0, 6, (ID3D11ShaderResourceView **)none);
++    ID3D11DeviceContext_OMSetRenderTargets(d3d.ctx, 1, &rtv, NULL);
++    ID3D11DeviceContext_RSSetViewports(d3d.ctx, 1, &vp);
++    ID3D11DeviceContext_PSSetShader(d3d.ctx, ps, NULL, 0);
++    ID3D11DeviceContext_PSSetShaderResources(d3d.ctx, 0, 6, srv);
++    ID3D11DeviceContext_Draw(d3d.ctx, 3, 0);
++}
++
++static void fg_bind_common(void)
++{
++    ID3D11DeviceContext_IASetPrimitiveTopology(d3d.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    ID3D11DeviceContext_IASetInputLayout(d3d.ctx, NULL);
++    ID3D11DeviceContext_VSSetShader(d3d.ctx, d3d.vs, NULL, 0);
++    ID3D11DeviceContext_PSSetSamplers(d3d.ctx, 0, 2, d3d.smp);
++    ID3D11DeviceContext_PSSetConstantBuffers(d3d.ctx, 1, 1, &fg.cb);
++}
++
++/* The frame just copied into g_tex, into the ring with its time and luma. */
++static void fg_push(void)
++{
++    double raw, t;
++    int i, l;
++    LONG seq;
++
++    if (!fg.ok)
++        return;
++    if ((fg.w != d3d.g_w || fg.h != d3d.g_h) && !fg_alloc(d3d.g_w, d3d.g_h))
++        return;
++    raw = (double)s_gpu_qpc / fg.qpf;
++    if (raw <= fg.last_raw)          /* stamped after its release: not yet */
++        raw = fg_now();
++    if (!fg.last_raw || raw - fg.last_raw > 0.25) {
++        t = raw;                     /* the first, or after a pause */
++    } else {
++        double dt = raw - fg.last_raw;
++        fg.interval = fg.interval > 0 ? fg.interval * 0.9 + dt * 0.1 : dt;
++        fg.step = floor(fg.interval * 60.0 + 0.5) / 60.0;
++        if (fg.step < 1.0 / 60.0)
++            fg.step = 1.0 / 60.0;
++        t = fg.last_t + fg.step;
++        if (fabs(raw - t) > fg.step * 0.5)
++            t = raw;                 /* a frame dropped, or the rate changed */
++        else
++            t += (raw - t) * 0.1;
++    }
++    if (t <= fg.last_t)
++        t = fg.last_t + 0.001;
++    fg.last_raw = raw;
++    fg.last_t = t;
++
++    seq = ++fg.seq;
++    i = (int)(seq % FG_SLOTS);
++    ID3D11DeviceContext_CopyResource(d3d.ctx, (ID3D11Resource *)fg.slot[i].tex,
++                                     (ID3D11Resource *)d3d.g_tex);
++    fg.slot[i].t = t;
++    fg.slot[i].seq = seq;
++    if (s_cfg.frame_gen == FG_MOTION) {
++        fg_bind_common();
++        fg_pass(fg.ps_lum0, fg.slot[i].lrtv[0], fg.lw[0], fg.lh[0],
++                fg.slot[i].srv, NULL, NULL, NULL, NULL, 0, 0, 0);
++        for (l = 1; l < FG_LEVELS; l++)
++            fg_pass(fg.ps_lumd, fg.slot[i].lrtv[l], fg.lw[l], fg.lh[l],
++                    NULL, NULL, NULL, fg.slot[i].lsrv[l - 1], NULL, 0, 0, 0);
++    } else {
++        fg.slot[i].seq = -seq;       /* no luma: not for motion */
++    }
++}
++
++/* Whether this thread should present at every refresh: frame generation on
++ * and the GPU back end sending frames. */
++static int fg_live(void)
++{
++    return s_cfg.frame_gen && fg.ok && d3d.dev && s_gpu_handle
++        && fg_now() - (double)s_gpu_qpc / fg.qpf < 0.25;
++}
++
++/* The frame to show now: g_srv's newest frame held back and the ones made
++ * between, or NULL to show g_srv as it is. */
++static ID3D11ShaderResourceView *fg_frame(void)
++{
++    double now = fg_now(), T, ft;
++    int i, a = -1, b = -1, l;
++    LONG sa, sb;
++
++    if (fg.last_present && now - fg.last_present < 0.05)
++        fg.period = fg.period ? fg.period * 0.95 + (now - fg.last_present) * 0.05
++                              : now - fg.last_present;
++    fg.last_present = now;
++    if (!fg_live() || !fg.w || fg.w != d3d.g_w || fg.h != d3d.g_h || fg.step <= 0)
++        return NULL;
++    T = now - fg.step - fg.margin;
++    /* A: the newest frame at or before T; B: the oldest after it. */
++    for (i = 0; i < FG_SLOTS; i++) {
++        LONG s = fg.slot[i].seq < 0 ? -fg.slot[i].seq : fg.slot[i].seq;
++        if (!s || fg.slot[i].t > T) continue;
++        if (a < 0 || s > (fg.slot[a].seq < 0 ? -fg.slot[a].seq : fg.slot[a].seq)) a = i;
++    }
++    if (a < 0)
++        return NULL;
++    sa = fg.slot[a].seq < 0 ? -fg.slot[a].seq : fg.slot[a].seq;
++    for (i = 0; i < FG_SLOTS; i++) {
++        LONG s = fg.slot[i].seq < 0 ? -fg.slot[i].seq : fg.slot[i].seq;
++        if (s == sa + 1) b = i;
++    }
++    if (b < 0) {                       /* B is late, or there is none yet */
++        fg.held++;
++        return fg.slot[a].srv;
++    }
++    sb = sa + 1;
++    ft = (T - fg.slot[a].t) / (fg.slot[b].t - fg.slot[a].t);
++    /* After a pause, or when the display is no faster than the game, a made
++     * frame shows nothing new: cut instead. */
++    if (fg.slot[b].t - fg.slot[a].t > 0.1
++        || (fg.period && fg.period > 0.9 * (fg.slot[b].t - fg.slot[a].t)))
++        ft = ft < 0.5 ? 0.0 : 1.0;
++    if (ft < 0.002)
++        return fg.slot[a].srv;
++    if (ft > 0.998)
++        return fg.slot[b].srv;
++
++    fg_bind_common();
++    if (s_cfg.frame_gen == FG_MOTION && fg.slot[a].seq > 0 && fg.slot[b].seq > 0
++        && (fg.va != sa || fg.vb != sb)) {
++        fg_pass(fg.ps_search, fg.vrtv[FG_LEVELS - 1], fg.lw[FG_LEVELS - 1], fg.lh[FG_LEVELS - 1],
++                NULL, NULL, NULL, fg.slot[a].lsrv[FG_LEVELS - 1], fg.slot[b].lsrv[FG_LEVELS - 1],
++                0, 0, 0);
++        for (l = FG_LEVELS - 2; l >= 0; l--)
++            fg_pass(fg.ps_refine, fg.vrtv[l], fg.lw[l], fg.lh[l], NULL, NULL, fg.vsrv[l + 1],
++                    fg.slot[a].lsrv[l], fg.slot[b].lsrv[l], fg.lw[l + 1], fg.lh[l + 1], 0);
++        fg.va = sa;
++        fg.vb = sb;
++    }
++    if (s_cfg.frame_gen == FG_MOTION && (fg.va != sa || fg.vb != sb)) {
++        /* No luma for one of them (motion was just turned on): blend. */
++        fg_pass(fg.ps_interp, fg.out_rtv, fg.w, fg.h, fg.slot[a].srv, fg.slot[b].srv,
++                NULL, NULL, NULL, 0, 0, (float)ft);
++    } else {
++        fg_pass(fg.ps_interp, fg.out_rtv, fg.w, fg.h, fg.slot[a].srv, fg.slot[b].srv,
++                fg.vsrv[0], NULL, NULL, 0, 0, (float)ft);
++    }
++    {
++        static ID3D11ShaderResourceView *const none[6];
++        ID3D11DeviceContext_PSSetShaderResources(d3d.ctx, 0, 6, (ID3D11ShaderResourceView **)none);
++    }
++    fg.made++;
++    return fg.out_srv;
++}
++
++/* The shaders, once per device; frame generation stays off without them. */
++static void fg_init(void)
++{
++    static const char *const entry[5] = { "fg_lum0", "fg_lumd", "fg_search", "fg_refine", "fg_interp" };
++    ID3D11PixelShader **ps[5];
++    D3D11_BUFFER_DESC bd;
++    LARGE_INTEGER f;
++    const char *v = getenv("RECOMP_FRAME_GEN_MS");
++    int i, ok = 1;
++
++    ps[0] = &fg.ps_lum0; ps[1] = &fg.ps_lumd; ps[2] = &fg.ps_search;
++    ps[3] = &fg.ps_refine; ps[4] = &fg.ps_interp;
++    memset(&fg, 0, sizeof fg);
++    QueryPerformanceFrequency(&f);
++    fg.qpf = (double)f.QuadPart;
++    fg.margin = (v ? atof(v) : 5.0) / 1000.0;
++    for (i = 0; ok && i < 5; i++) {
++        ID3DBlob *b = d3d_compile(entry[i], "ps_4_0");
++        ok = b && SUCCEEDED(ID3D11Device_CreatePixelShader(d3d.dev, ID3D10Blob_GetBufferPointer(b),
++                                                           ID3D10Blob_GetBufferSize(b), NULL, ps[i]));
++        SAFE_RELEASE(b);
++    }
++    memset(&bd, 0, sizeof bd);
++    bd.ByteWidth = sizeof(FgConsts);
++    bd.Usage = D3D11_USAGE_DEFAULT;
++    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++    ok = ok && SUCCEEDED(ID3D11Device_CreateBuffer(d3d.dev, &bd, NULL, &fg.cb));
++    if (!ok) {
++        fprintf(stderr, "  [FBWIN] frame generation unavailable (shaders)\n");
++        fg_free();
++        return;
++    }
++    fg.ok = 1;
 +}
 +
 +static int d3d_make_rtv(void)
@@ -14041,6 +14525,16 @@ index b26edfe..6f91a94 100644
 +    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 +    if (FAILED(ID3D11Device_CreateBuffer(d3d.dev, &bd, NULL, &d3d.cb)))
 +        goto out;
++    /* One frame queued at most: with frame generation this thread presents
++     * at every refresh, and a deeper queue only adds latency. */
++    {
++        IDXGIDevice1 *xdev1 = NULL;
++        if (SUCCEEDED(ID3D11Device_QueryInterface(d3d.dev, &IID_IDXGIDevice1, (void **)&xdev1))) {
++            IDXGIDevice1_SetMaximumFrameLatency(xdev1, 1);
++            IDXGIDevice1_Release(xdev1);
++        }
++    }
++    fg_init();
 +    ok = 1;
 +
 +out:
@@ -14059,6 +14553,11 @@ index b26edfe..6f91a94 100644
 +                                  d3d.sc_flags);
 +    d3d_make_rtv();
 +}
++
++/* Whether the last present showed a frame-generation frame, and how many
++ * did (the title bar's display rate). Window thread only. */
++static int  s_fg_shown;
++static LONG s_fg_presents;
 +
 +/* Upload s_rgb and draw it letterboxed. Returns the Present result. */
 +static HRESULT d3d_present(HWND hwnd)
@@ -14085,6 +14584,14 @@ index b26edfe..6f91a94 100644
 +        ID3D11DeviceContext_Unmap(d3d.ctx, (ID3D11Resource *)d3d.tex, 0);
 +    }
 +    srv = gpu ? d3d.g_srv : d3d.srv;
++    s_fg_shown = 0;
++    if (gpu && s_cfg.frame_gen) {
++        ID3D11ShaderResourceView *made = fg_frame();
++        if (made) {
++            srv = made;
++            s_fg_shown = 1;
++        }
++    }
 +    src_w = gpu ? (float)d3d.g_w : (float)s_fb_width;
 +    src_h = gpu ? (float)d3d.g_h : (float)s_fb_height;
 +
@@ -14173,6 +14680,12 @@ index b26edfe..6f91a94 100644
 +        }
 +    }
 +
++    /* Frame generation paces itself on the display: vsync whatever the
++     * setting. */
++    if (s_fg_shown) {
++        s_fg_presents++;
++        return IDXGISwapChain1_Present(d3d.sc, 1, 0);
++    }
 +    return IDXGISwapChain1_Present(d3d.sc, s_cfg.vsync ? 1 : 0,
 +                                   (!s_cfg.vsync && d3d.tearing)
 +                                       ? DXGI_PRESENT_ALLOW_TEARING : 0);
@@ -14251,7 +14764,7 @@ index b26edfe..6f91a94 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +2303,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -286,9 +2816,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -14277,7 +14790,7 @@ index b26edfe..6f91a94 100644
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
-@@ -309,36 +2339,100 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -309,36 +2852,101 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
  
@@ -14295,7 +14808,7 @@ index b26edfe..6f91a94 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
-+        int have = 0, fresh, resized;
++        int have = 0, fresh, resized, fg_on;
          while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
              TranslateMessage(&msg);
              DispatchMessageA(&msg);
@@ -14344,7 +14857,7 @@ index b26edfe..6f91a94 100644
 +            /* The launcher, or black from Play until the title's first
 +             * frame (s_rgb starts zeroed). */
 +            have = 1;
-+        }
+         }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
 +        xbox_PvideoTrace();
@@ -14355,7 +14868,8 @@ index b26edfe..6f91a94 100644
 +         * sleeps between frames rather than spinning. */
 +        resized = InterlockedExchange(&s_resized, 0) != 0;
 +        need_resize |= resized;          /* kept until the next draw */
-+        fresh = s_flips != last_flips || resized || s_ov.dirty
++        fg_on = use_d3d && fg_live();
++        fresh = fg_on || s_flips != last_flips || resized || s_ov.dirty
 +                || xbox_PvideoChangeCount() != last_pvideo  /* a movie frame */
 +                || s_present_idx < 0 || GetTickCount() - last_draw >= 100;
 +        if (have && fresh) {
@@ -14382,13 +14896,13 @@ index b26edfe..6f91a94 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
-         }
-+        if (!use_d3d || !s_cfg.vsync || !(have && fresh))
++        }
++        if (!use_d3d || !(s_cfg.vsync || (fg_on && s_fg_shown)) || !(have && fresh))
 +            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,41 +2443,73 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -349,41 +2957,89 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -14423,8 +14937,9 @@ index b26edfe..6f91a94 100644
          }
          {
 -            static DWORD t0;
+-            static LONG f0;
 +            static DWORD t0, shown_until;
-             static LONG f0;
++            static LONG f0, p0;
              DWORD now = GetTickCount();
              if (now - t0 >= 1000) {
                  LONG f = s_flips;
@@ -14434,18 +14949,35 @@ index b26edfe..6f91a94 100644
 -                           (long)s_frame_draws);
 -                tb[127] = 0;
 -                SetWindowTextW(hwnd, tb);
+-                t0 = now; f0 = f;
 +                double fps = t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0;
-                 t0 = now; f0 = f;
++                double shown = t0 ? (s_fg_presents - p0) * 1000.0 / (now - t0) : 0.0;
++                t0 = now; f0 = f; p0 = s_fg_presents;
 +                if (s_cfg.fps_counter) {
-+                    snprintf(s_ov.fps, sizeof s_ov.fps, "%.0f FPS", fps);
++                    if (shown > 0.5)
++                        snprintf(s_ov.fps, sizeof s_ov.fps, "%.0f FPS, %.0f shown", fps, shown);
++                    else
++                        snprintf(s_ov.fps, sizeof s_ov.fps, "%.0f FPS", fps);
 +                    s_ov.dirty = 1;
++                }
++                static LONG64 m0, h0;
++                if (s_cfg.frame_gen && fg.ok && (fg.made != m0 || fg.held != h0)) {
++                    fprintf(stderr, "  [FBWIN] frame gen %s: %.1f game fps, %.1f shown, %lld made, "
++                            "%lld held (late frame), step %.1f ms, display %.2f ms\n",
++                            frame_gen_name(s_cfg.frame_gen), fps, shown, fg.made - m0, fg.held - h0,
++                            fg.step * 1000.0, fg.period * 1000.0);
++                    m0 = fg.made; h0 = fg.held;
 +                }
 +                if (s_launcher) {
 +                    SetWindowTextA(hwnd, s_cfg.title);
 +                } else if ((LONG)(s_notice_until - now) <= 0) {
 +                    wchar_t tb[160];
-+                    _snwprintf(tb, 159, L"%hs - %ls | FPS: %.1f | draws: %ld",
-+                               s_cfg.title, s_title, fps, (long)s_frame_draws);
++                    if (shown > 0.5)
++                        _snwprintf(tb, 159, L"%hs - %ls | FPS: %.1f (%.0f shown) | draws: %ld",
++                                   s_cfg.title, s_title, fps, shown, (long)s_frame_draws);
++                    else
++                        _snwprintf(tb, 159, L"%hs - %ls | FPS: %.1f | draws: %ld",
++                                   s_cfg.title, s_title, fps, (long)s_frame_draws);
 +                    tb[159] = 0;
 +                    SetWindowTextW(hwnd, tb);
 +                }
@@ -14476,7 +15008,7 @@ index b26edfe..6f91a94 100644
      return 0;
  }
  
-@@ -391,7 +2517,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -391,7 +3047,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -14485,7 +15017,7 @@ index b26edfe..6f91a94 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -402,4 +2528,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -402,4 +3058,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  

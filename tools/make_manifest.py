@@ -1,6 +1,16 @@
+"""make_manifest.py - write .recomp.json (the recomp.fyi row). Run from deathrow/.
+
+  py -3 tools/make_manifest.py [path/to/default.xbe] [--status playable|released|...]
+"""
 import json, hashlib, struct, sys, urllib.request
 
-xbe = sys.argv[1] if len(sys.argv) > 1 else '../xboxrecomp/game_files/default.xbe'
+args = sys.argv[1:]
+status = 'playable'            # 'released' once a build is published on GitHub
+if '--status' in args:
+    i = args.index('--status')
+    status = args[i + 1]
+    del args[i:i + 2]
+xbe = args[0] if args else '../xboxrecomp/game_files/default.xbe'
 d = open(xbe, 'rb').read()
 if d[:4] != b'XBEH':
     sys.exit('not an XBE: ' + xbe)
@@ -32,24 +42,29 @@ m = {
     'type': 'recomp',
     'original': original,
     'project': 'Exonerated',
-    'status': 'in-progress',
+    'status': status,
     'targets': ['Windows'],
     'toolchain': 'Xboxrecomp',
-    'approach': 'Static recompilation of the XBE to C with xboxrecomp; software NV2A rasteriser with fixed-function T&L',
+    'approach': ('Static recompilation of the XBE to C with xboxrecomp; NV2A pushbuffers drawn '
+                 'by a Direct3D 11 back end (up to 4x, widescreen), CPU rasteriser as fallback'),
     'maintainers': [{'name': 'AsukaNeo', 'link': 'https://github.com/AsukaNeo'}],
-    'help': ['Rasteriser speed (register combiners, texture sampling)',
-             'Player texture artifacts',
-             'NV2A fixed-function lighting',
-             'Audio (APU / DirectSound)'],
-    'notes': ('Boots to the menus and plays a full match end to end: team select, kickoff, '
-              'replays, back to the main menu. Software rendering runs at roughly 8-9 fps in a '
-              'match. Fixed-function draw calls are now rendered, which restored the players\' '
-              'lower bodies. Next: rendering speed, jersey texture artifacts, lighting, audio.'),
+    'links': [{'label': 'Download', 'url': 'https://github.com/AsukaNeo/Exonerated/releases'}],
+    'tags': ['widescreen', 'upscaling', 'launcher'],
+    'help': ['Light-glow flicker on the GPU renderer',
+             'Texture glitches (striped pre-match loading backdrop)',
+             'Testing on more graphics cards',
+             'Linux / Steam Deck build'],
+    'notes': ('Plays full matches start to finish. GPU renderer (Direct3D 11) at up to 4x the '
+              'Xbox resolution, in the game\'s own 16:9 mode; the game\'s movies play in the '
+              'window. Title card with settings, F10 overlay (live render resolution, AF, '
+              'sharpening, FXAA), controller with rumble, keyboard. The download needs your own '
+              'North American disc (v3): the first start copies the game from your .iso. Next: '
+              'flicker and texture glitches, testing on more GPUs.'),
 }
 if qid:
     m['wikidata'] = qid
 keys = ['$schema', 'game', 'wikidata', 'system', 'type', 'original', 'project', 'status',
-        'targets', 'toolchain', 'approach', 'maintainers', 'help', 'notes']
+        'targets', 'toolchain', 'approach', 'maintainers', 'links', 'tags', 'help', 'notes']
 m = {k: m[k] for k in keys if k in m}
 assert len(m['notes']) <= 600 and len(m['approach']) <= 200
 open('.recomp.json', 'w', encoding='utf-8', newline='\n').write(json.dumps(m, indent=2, ensure_ascii=False) + '\n')

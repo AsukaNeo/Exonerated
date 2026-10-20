@@ -46,6 +46,8 @@ fps_counter=0
 anisotropy=0
 sharpen=0
 fxaa=0
+; frame_gen: off, blend or motion -- extra frames up to your display's refresh rate.
+frame_gen=off
 
 [input]
 rumble=1

@@ -11,23 +11,34 @@
     "sha1": "34ef43c83ffa6860019edc4fc183241107a11ed2"
   },
   "project": "Exonerated",
-  "status": "in-progress",
+  "status": "playable",
   "targets": [
     "Windows"
   ],
   "toolchain": "Xboxrecomp",
-  "approach": "Static recompilation of the XBE to C with xboxrecomp; software NV2A rasteriser with fixed-function T&L",
+  "approach": "Static recompilation of the XBE to C with xboxrecomp; NV2A pushbuffers drawn by a Direct3D 11 back end (up to 4x, widescreen), CPU rasteriser as fallback",
   "maintainers": [
     {
       "name": "AsukaNeo",
       "link": "https://github.com/AsukaNeo"
     }
   ],
-  "help": [
-    "Rasteriser speed (register combiners, texture sampling)",
-    "Player texture artifacts",
-    "NV2A fixed-function lighting",
-    "Audio (APU / DirectSound)"
+  "links": [
+    {
+      "label": "Download",
+      "url": "https://github.com/AsukaNeo/Exonerated/releases"
+    }
   ],
-  "notes": "Boots to the menus and plays a full match end to end: team select, kickoff, replays, back to the main menu. Software rendering runs at roughly 8-9 fps in a match. Fixed-function draw calls are now rendered, which restored the players' lower bodies. Next: rendering speed, jersey texture artifacts, lighting, audio."
+  "tags": [
+    "widescreen",
+    "upscaling",
+    "launcher"
+  ],
+  "help": [
+    "Light-glow flicker on the GPU renderer",
+    "Texture glitches (striped pre-match loading backdrop)",
+    "Testing on more graphics cards",
+    "Linux / Steam Deck build"
+  ],
+  "notes": "Plays full matches start to finish. GPU renderer (Direct3D 11) at up to 4x the Xbox resolution, in the game's own 16:9 mode; the game's movies play in the window. Title card with settings, F10 overlay (live render resolution, AF, sharpening, FXAA), controller with rumble, keyboard. The download needs your own North American disc (v3): the first start copies the game from your .iso. Next: flicker and texture glitches, testing on more GPUs."
 }
