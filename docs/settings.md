@@ -6,7 +6,7 @@ The downloaded game opens on a title card: **Play**, **Settings** and **Exit to 
 
 ## Settings overlay
 
-Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, render resolution, anisotropic filtering, sharpening, FXAA, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer** and **Widescreen** can't change in the middle of a game: pick a new value and a **Restart now to apply** row appears, which saves and starts the game again on the title card. **Exit to Windows** quits.
+Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, render resolution, anisotropic filtering, sharpening, FXAA, frame generation, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer** and **Widescreen** can't change in the middle of a game: pick a new value and a **Restart now to apply** row appears, which saves and starts the game again on the title card. **Exit to Windows** quits.
 
 Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The mouse works too: click a row to apply or change it, right-click to change it the other way. The game keeps running underneath, but it ignores your inputs while the overlay is open.
 
@@ -46,6 +46,13 @@ anisotropy=0       ; RECOMP_ANISOTROPY: 2, 4, 8 or 16 for at least that much
 sharpen=0          ; RECOMP_SHARPEN: 1-100, contrast-adaptive sharpening
                    ;   (AMD FidelityFX CAS) of the finished frame; 0 is off
 fxaa=0             ; RECOMP_FXAA: 1 to smooth jagged edges (FXAA)
+frame_gen=off      ; RECOMP_FRAME_GEN: blend or motion to show the game at your
+                   ;   display's refresh rate (144 Hz and up) with frames made
+                   ;   between the game's own 30 (60 in menus): blend crossfades,
+                   ;   motion moves the picture along motion found on the GPU.
+                   ;   The game runs at the same speed; the picture is about one
+                   ;   game frame (33 ms) later. Turns vsync on while it runs.
+                   ;   GPU renderer only
 
 [input]
 rumble=1           ; RECOMP_RUMBLE: 0 to turn it off
