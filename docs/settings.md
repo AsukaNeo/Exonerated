@@ -1,10 +1,14 @@
 # Settings and controls
 
+## Title card
+
+The downloaded game opens on a title card: **Play**, **Settings** and **Exit to Windows**. Everything in Settings applies straight away, because the game has not started yet, including the renderer and widescreen, and is saved to `exonerated.ini` when you go back. Use the arrow keys or d-pad and Enter or A, or point and click with the mouse.
+
 ## Settings overlay
 
-Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, anisotropic filtering, sharpening, FXAA, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer**, **Render resolution** and **Widescreen** take effect the next time you start the game, after Save settings.
+Press **F10**, or **Back+Start** on the pad, to open the settings overlay while you play. It changes fullscreen, vsync, filter, scale, render resolution, anisotropic filtering, sharpening, FXAA, an on-screen FPS counter, rumble and the stick dead zone straight away, takes screenshots, and **Save settings** writes everything to `exonerated.ini`. **Renderer** and **Widescreen** can't change in the middle of a game: pick a new value and a **Restart now to apply** row appears, which saves and starts the game again on the title card. **Exit to Windows** quits.
 
-Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The game keeps running underneath, but it ignores your inputs while the overlay is open.
+Move with the d-pad, left stick or arrow keys, change a value with left/right, apply with A or Enter, and close with B, Start or Esc. The mouse works too: click a row to apply or change it, right-click to change it the other way. The game keeps running underneath, but it ignores your inputs while the overlay is open.
 
 ## Window keys
 

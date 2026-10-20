@@ -1,6 +1,10 @@
 /* Resources linked into the exe (CMakeLists.txt configures this file).
  *
  * RECOMP_OVERLAY_LOGO: the project art, shown at the left of the F10
- * settings overlay (xboxrecomp src/video/fb_present.c). Embedded so a
- * packaged build needs no assets folder beside it. */
+ * settings overlay (xboxrecomp src/video/fb_present.c).
+ * RECOMP_TITLE_CARD: the wordmark on the launcher's title card.
+ * RECOMP_TITLE_MARK: the author's mark, in a corner of the title card.
+ * Embedded so a packaged build needs no assets folder beside it. */
 RECOMP_OVERLAY_LOGO RCDATA "@DR_OVERLAY_LOGO@"
+RECOMP_TITLE_CARD RCDATA "@DR_TITLE_CARD@"
+RECOMP_TITLE_MARK RCDATA "@DR_TITLE_MARK@"

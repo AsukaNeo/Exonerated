@@ -146,8 +146,14 @@ else()
         DR_FALLBACK_GAME_DIR="${DR_FALLBACK_GAME_DIR_C}")
 endif()
 
-# The overlay's logo, embedded in the exe as RECOMP_OVERLAY_LOGO. The .rc is
-# configured with an absolute path so rc.exe finds the PNG from any folder.
+# The overlay's logo and the launcher's title card, embedded in the exe
+# (RECOMP_OVERLAY_LOGO, RECOMP_TITLE_CARD, RECOMP_TITLE_MARK). The .rc is
+# configured with absolute paths so rc.exe finds the PNGs from any folder.
 set(DR_OVERLAY_LOGO "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-logo.png")
+set(DR_TITLE_CARD "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-wordmark.png")
+set(DR_TITLE_MARK "${CMAKE_CURRENT_SOURCE_DIR}/assets/asukaneo-mark.png")
+# The version the launcher shows (tools/make_release.py passes it).
+set(DR_VERSION "dev" CACHE STRING "Version shown on the launcher")
+target_compile_definitions(deathrow_recomp PRIVATE DR_VERSION="${DR_VERSION}")
 configure_file(src/exonerated.rc.in ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc @ONLY)
 target_sources(deathrow_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc)

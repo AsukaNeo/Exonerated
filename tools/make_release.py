@@ -162,7 +162,7 @@ def main():
         version += "-dirty" if not version.endswith("-dirty") else ""
 
     if not args.skip_build:
-        run(["cmake", "-S", ".", "-B", BUILD, "-DDR_RELEASE=ON"])
+        run(["cmake", "-S", ".", "-B", BUILD, "-DDR_RELEASE=ON", "-DDR_VERSION=" + version])
         run(["cmake", "--build", BUILD, "--config", "Release"])
     exe = os.path.join(BUILD, "Release", "deathrow_recomp.exe")
     if not os.path.isfile(exe):

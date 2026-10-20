@@ -21,18 +21,21 @@ FIRST START
      (about 1.1 GB).
   You can also drag the .iso onto Exonerated.exe. Everything then lives in
   this one folder: Exonerated.exe, exonerated.ini and game.
+  4. The title card opens: Play, Settings or Exit to Windows. Use the
+     arrow keys or d-pad and Enter or A, or the mouse.
 
 PICTURE
   The game draws on your graphics card at twice the Xbox's resolution
   (1280x960), in its own 16:9 widescreen mode, and its movies play in the
-  same window. Change Renderer, Render resolution (1x-4x) or Widescreen in
-  the F10 overlay, then Save settings and restart. If the picture is wrong
-  on your graphics card, set renderer=software in exonerated.ini.
+  same window. Change it all under Settings on the title card, or with F10
+  while you play: Render resolution (1x-4x) changes at once; Renderer and
+  Widescreen offer "Restart now to apply". If the picture is wrong on your
+  graphics card, choose Renderer: Software.
 
 CONTROLS
   Any Xbox-style controller works as player 1. Keyboard: Enter = Start,
   Z X C V = A B X Y, WASD to move, arrow keys for the d-pad.
-  F10 (or Back+Start on the pad): settings overlay
+  F10 (or Back+Start on the pad): settings overlay, with Exit to Windows
   Alt+Enter or F11: fullscreen          F12: screenshot
 
 IF SOMETHING GOES WRONG

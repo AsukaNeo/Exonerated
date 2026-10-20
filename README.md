@@ -25,7 +25,7 @@
 - ✅ Full matches, menus, audio, controller with rumble, keyboard
 - ✅ GPU renderer (Direct3D 11) at up to 4x the Xbox's resolution, in the game's own 16:9 mode
 - ✅ The game's movies, in the game window: the intros, the attract loop, the clip in the game-mode menu
-- ✅ Scalable window, borderless fullscreen, in-game settings overlay
+- ✅ Title card with settings before you play; scalable window, borderless fullscreen, in-game settings overlay
 - 🚧 Game speed: paced at 30 frames per second for now (the game ran too fast at 60)
 - 🚧 Some texture glitches, including a striped backdrop on the pre-match loading screen
 - ⛔ No online or System Link play, and none planned

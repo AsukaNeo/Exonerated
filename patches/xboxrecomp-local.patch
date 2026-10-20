@@ -3000,10 +3000,10 @@ index 0000000..d0b2adc
 +#endif
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
 new file mode 100644
-index 0000000..00fdb2b
+index 0000000..7b0301c
 --- /dev/null
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
-@@ -0,0 +1,3913 @@
+@@ -0,0 +1,3938 @@
 +#include "nv2a_gpu.h"
 +#include <d3d11.h>
 +#include <d3d11_1.h>
@@ -3927,18 +3927,24 @@ index 0000000..00fdb2b
 + * guest's size, the viewport and scissor are scaled to match, and the vertex
 + * shader (which maps guest pixels to clip space through the viewport
 + * constant) needs nothing. Guest RAM keeps the guest's size: what is written
-+ * back is downscaled, what is uploaded from it is upscaled. Read once, from
-+ * RECOMP_RENDER_SCALE or [display] render_scale (fb_present.c), 1-4. */
++ * back is downscaled, what is uploaded from it is upscaled. From
++ * RECOMP_RENDER_SCALE or [display] render_scale (fb_present.c), 1-4; the F10
++ * overlay can change it while playing, and nv2a_gpu_flip takes the change
++ * between frames (apply_render_scale_change). */
 +extern "C" int xbox_FramebufferWindowRenderScale(void);
++static uint32_t s_render_scale;
++static uint32_t wanted_render_scale()
++{
++    int value = xbox_FramebufferWindowRenderScale();
++    return value < 1 ? 1u : value > 4 ? 4u : (uint32_t)value;
++}
 +static uint32_t render_scale()
 +{
-+    static uint32_t scale;
-+    if (!scale) {
-+        int value = xbox_FramebufferWindowRenderScale();
-+        scale = value < 1 ? 1u : value > 4 ? 4u : (uint32_t)value;
-+        std::fprintf(stderr, "[GPU-D3D11] render scale %ux\n", scale);
++    if (!s_render_scale) {
++        s_render_scale = wanted_render_scale();
++        std::fprintf(stderr, "[GPU-D3D11] render scale %ux\n", s_render_scale);
 +    }
-+    return scale;
++    return s_render_scale;
 +}
 +
 +static D3D11_RECT scaled_rect(const D3D11_RECT &rect)
@@ -5167,6 +5173,8 @@ index 0000000..00fdb2b
 +/* Returns the guest VA the caller should display this flip. In the default
 + * (synchronous) path that is the buffer just published; with RECOMP_ASYNC_FLIP
 + * it is the previous frame's buffer, resolved without a GPU wait. */
++static void apply_render_scale_change(void);
++
 +extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch)
 +{
 +    drop_released_targets();
@@ -5198,7 +5206,24 @@ index 0000000..00fdb2b
 +        if (!surface.dirty) surface.needs_refresh = true;
 +    for (auto &surface : depth_surfaces)
 +        if (!surface.dirty) surface.needs_refresh = true;
++    apply_render_scale_change();
 +    return show;
++}
++
++/* A render scale picked in the F10 overlay, taken at a frame boundary: the
++ * frame just ended is in guest RAM (and on screen), so every colour and depth
++ * target can be dropped and made again at the new size from guest RAM as the
++ * next frame draws. The window's shared frame is resized by
++ * present_pipeline_ready on the next present. Not with RECOMP_ASYNC_FLIP,
++ * where a staged frame at the old size is still outstanding. */
++static void apply_render_scale_change(void)
++{
++    uint32_t want = wanted_render_scale();
++    if (!s_render_scale || want == s_render_scale || async_flip_enabled())
++        return;
++    nv2a_gpu_invalidate();
++    std::fprintf(stderr, "[GPU-D3D11] render scale %ux -> %ux\n", s_render_scale, want);
++    s_render_scale = want;
 +}
 +
 +/* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
@@ -12119,7 +12144,7 @@ index 4e86a08..8b2fee2 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..e1d63e1 100644
+index b26edfe..6f91a94 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -7,20 +7,75 @@
@@ -12272,7 +12297,7 @@ index b26edfe..e1d63e1 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -145,16 +249,324 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -145,16 +249,335 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12523,6 +12548,17 @@ index b26edfe..e1d63e1 100644
 +static volatile LONG s_ov_key;        /* a key for the overlay, or 0 */
 +static int           s_is_fullscreen;
 +
++/* The launcher (xbox_LauncherRun): the window's first screen, before the
++ * title boots. 1 on its title card, 2 on its settings page, 0 once Play is
++ * chosen (or when there is none). */
++enum { LAUNCHER_OFF, LAUNCHER_CARD, LAUNCHER_SETTINGS };
++static volatile LONG s_launcher;
++static int           s_launcher_used;   /* it ran: draw black until a frame */
++static HANDLE        s_launcher_play;   /* set when Play is chosen */
++static char          s_launcher_version[48];
++
++static void ov_mouse(HWND hwnd, int x, int y, int button);
++
 +/* Borderless fullscreen on the window's monitor, and back to the window it
 + * was. Not exclusive fullscreen: Alt+Tab and a second monitor keep working,
 + * and a flip-model swapchain covering the monitor is just as fast. */
@@ -12589,15 +12625,33 @@ index b26edfe..e1d63e1 100644
 +                InterlockedExchange(&s_want_screenshot, 1);
 +            return 0;
 +        }
-+        if (s_ov_open && m == WM_KEYDOWN) {
-+            /* The overlay has the keyboard; arrows repeat. */
++        if ((s_ov_open || s_launcher) && m == WM_KEYDOWN) {
++            /* The overlay (or the launcher) has the keyboard; arrows repeat. */
 +            InterlockedExchange(&s_ov_key, (LONG)w);
 +            return 0;
 +        }
          xbox_InputKeySet((int)w, 1);
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
-@@ -268,15 +680,1325 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -183,6 +606,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+     case WM_KILLFOCUS:
+         xbox_InputKeysClear();
+         return 0;
++
++    /* The mouse works the menus: point at a row, click to apply or change
++     * it (right-click changes it the other way). This thread is the window
++     * thread, which owns the menu state. */
++    case WM_MOUSEMOVE:
++    case WM_LBUTTONDOWN:
++    case WM_RBUTTONDOWN:
++        if (s_ov_open || s_launcher)
++            ov_mouse(h, (short)LOWORD(l), (short)HIWORD(l),
++                     m == WM_LBUTTONDOWN ? 1 : m == WM_RBUTTONDOWN ? -1 : 0);
++        return 0;
+     }
+     return DefWindowProcA(h, m, w, l);
+ }
+@@ -268,15 +702,1598 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -12614,18 +12668,20 @@ index b26edfe..e1d63e1 100644
 + * frame by the D3D11 presenter, or copied over it opaque by the GDI one. */
 +enum { OV_FULLSCREEN, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
 +       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FPS,
-+       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_CLOSE, OV_COUNT };
++       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
++       OV_PLAY, OV_SETTINGS, OV_BACK, OV_ITEMS };
++#define OV_MAX_ROWS 24
 +
-+/* The renderer, render scale and widescreen picked in the overlay. The back
-+ * end is chosen and sizes its targets once, and the title reads its video
-+ * settings once, so new values are saved for the next start rather than
-+ * applied. -1 / 0 until the overlay first shows them. */
++/* The renderer and widescreen picked in the overlay. The back end is chosen
++ * once and the title reads its video settings once, so during play a new
++ * value waits for a restart ("Restart now"); on the launcher, before the
++ * title has started, it applies straight away. -1 until the overlay first
++ * shows them. */
 +static int s_gpu_pending = -1;
-+static int s_render_pending;
 +static int s_wide_pending = -1;
 +
 +static struct {
-+    int       sel;
++    int       sel;               /* a row of ov_rows() */
 +    int       dirty;             /* the image needs drawing again */
 +    int       release_wait;      /* closed: give the pad back once released */
 +    HDC       dc;
@@ -12634,6 +12690,8 @@ index b26edfe..e1d63e1 100644
 +    int       w, h;
 +    RECT      rects[2];          /* what is drawn: panel, FPS box */
 +    int       nrects;
++    RECT      hit[OV_MAX_ROWS];  /* each row as last drawn, for the mouse */
++    int       nhit;
 +    char      status[160];
 +    DWORD     status_until;
 +    char      fps[32];
@@ -12646,7 +12704,7 @@ index b26edfe..e1d63e1 100644
 +
 +static int ov_visible(void)
 +{
-+    return s_ov_open || (s_cfg.fps_counter && s_ov.fps[0]);
++    return s_launcher || s_ov_open || (s_cfg.fps_counter && s_ov.fps[0]);
 +}
 +
 +static void ov_status(const char *msg)
@@ -12658,7 +12716,7 @@ index b26edfe..e1d63e1 100644
 +
 +static void ov_set_open(int on)
 +{
-+    if (on == (s_ov_open != 0))
++    if (s_launcher || on == (s_ov_open != 0))
 +        return;
 +    InterlockedExchange(&s_ov_open, on);
 +    if (on) {
@@ -12672,6 +12730,47 @@ index b26edfe..e1d63e1 100644
 +        s_ov.release_wait = 1;
 +    }
 +    s_ov.dirty = 1;
++}
++
++static int restart_pending(void)
++{
++    return (s_gpu_pending >= 0 && s_gpu_pending != s_cfg.gpu)
++        || (s_wide_pending >= 0 && s_wide_pending != s_cfg.widescreen);
++}
++
++/* The rows the menu shows now, as OV_ items: the launcher's title card, its
++ * settings page, or the in-game overlay. */
++static int ov_rows(int *rows)
++{
++    int n = 0, i;
++    if (s_launcher == LAUNCHER_CARD) {
++        rows[n++] = OV_PLAY;
++        rows[n++] = OV_SETTINGS;
++        rows[n++] = OV_EXIT;
++        return n;
++    }
++    for (i = OV_FULLSCREEN; i <= OV_DEADZONE; i++)
++        rows[n++] = i;
++    if (s_launcher) {
++        rows[n++] = OV_BACK;
++        return n;
++    }
++    rows[n++] = OV_SCREENSHOT;
++    rows[n++] = OV_SAVE;
++    if (restart_pending())
++        rows[n++] = OV_RESTART;
++    rows[n++] = OV_EXIT;
++    rows[n++] = OV_CLOSE;
++    return n;
++}
++
++/* The item under the selection, keeping the selection on the list. */
++static int ov_current(void)
++{
++    int rows[OV_MAX_ROWS], n = ov_rows(rows);
++    if (s_ov.sel >= n) s_ov.sel = n - 1;
++    if (s_ov.sel < 0) s_ov.sel = 0;
++    return rows[s_ov.sel];
 +}
 +
 +static const char *filter_name(int f)
@@ -12688,16 +12787,15 @@ index b26edfe..e1d63e1 100644
 +
 +static void ov_item(int i, const char **label, char *value, size_t n)
 +{
-+    static const char *const labels[OV_COUNT] = {
++    static const char *const labels[OV_ITEMS] = {
 +        "Fullscreen", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
 +        "Widescreen (16:9)", "Anisotropic filtering", "Sharpening", "FXAA",
 +        "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
-+        "Save settings", "Close"
++        "Save settings", "Restart now to apply", "Exit to Windows", "Close",
++        "Play", "Settings", "Back"
 +    };
 +    if (s_gpu_pending < 0)
 +        s_gpu_pending = s_cfg.gpu;
-+    if (!s_render_pending)
-+        s_render_pending = s_cfg.render_scale;
 +    if (s_wide_pending < 0)
 +        s_wide_pending = s_cfg.widescreen;
 +    *label = labels[i];
@@ -12711,20 +12809,19 @@ index b26edfe..e1d63e1 100644
 +                                 : s_cfg.scale == SCALE_INTEGER ? "Integer" : "Stretch"); break;
 +    case OV_GPU:
 +        snprintf(value, n, "%s%s", s_gpu_pending ? "GPU" : "Software",
-+                 s_gpu_pending != s_cfg.gpu ? " after save + restart" : "");
++                 s_gpu_pending != s_cfg.gpu ? " (restart)" : "");
 +        break;
 +    case OV_RENDER:
-+        if (!s_cfg.gpu && s_render_pending == s_cfg.render_scale)
-+            snprintf(value, n, "%dx (GPU renderer only)", s_render_pending);
-+        else if (s_render_pending == s_cfg.render_scale)
-+            snprintf(value, n, "%dx (%ux%u)", s_render_pending,
-+                     s_fb_width * (uint32_t)s_render_pending, s_fb_height * (uint32_t)s_render_pending);
++        if (!s_cfg.gpu)
++            snprintf(value, n, "%dx (GPU renderer only)", s_cfg.render_scale);
 +        else
-+            snprintf(value, n, "%dx after save + restart", s_render_pending);
++            snprintf(value, n, "%dx (%ux%u)", s_cfg.render_scale,
++                     s_fb_width * (uint32_t)s_cfg.render_scale,
++                     s_fb_height * (uint32_t)s_cfg.render_scale);
 +        break;
 +    case OV_WIDE:
 +        snprintf(value, n, "%s%s", s_wide_pending ? "On" : "Off",
-+                 s_wide_pending != s_cfg.widescreen ? " after save + restart" : "");
++                 s_wide_pending != s_cfg.widescreen ? " (restart)" : "");
 +        break;
 +    case OV_ANISO:
 +        if (s_cfg.anisotropy)
@@ -12749,8 +12846,9 @@ index b26edfe..e1d63e1 100644
 +}
 +
 +/* Write the current settings to the ini: the one read at start, or a new
-+ * <app>.ini in the working directory. */
-+static void ov_save(void)
++ * <app>.ini in the working directory. quiet: no status line (the launcher
++ * saves on its own when you leave its settings). */
++static void ov_save_to_ini(int quiet)
 +{
 +    char v[16];
 +    int ok;
@@ -12771,7 +12869,7 @@ index b26edfe..e1d63e1 100644
 +    ok &= WritePrivateProfileStringA("display", "renderer",
 +                                     (s_gpu_pending < 0 ? s_cfg.gpu : s_gpu_pending)
 +                                         ? "gpu" : "software", s_ini);
-+    snprintf(v, sizeof v, "%d", s_render_pending ? s_render_pending : s_cfg.render_scale);
++    snprintf(v, sizeof v, "%d", s_cfg.render_scale);
 +    ok &= WritePrivateProfileStringA("display", "render_scale", v, s_ini);
 +    ok &= WritePrivateProfileStringA("display", "widescreen",
 +                                     (s_wide_pending < 0 ? s_cfg.widescreen : s_wide_pending) ? "1" : "0",
@@ -12788,7 +12886,8 @@ index b26edfe..e1d63e1 100644
 +        char msg[160];
 +        const char *base = strrchr(s_ini, '\\');
 +        snprintf(msg, sizeof msg, "Saved to %s", base ? base + 1 : s_ini);
-+        ov_status(msg);
++        if (!quiet)
++            ov_status(msg);
 +        fprintf(stderr, "  [FBWIN] settings saved to %s\n", s_ini);
 +    } else {
 +        ov_status("Could not save settings");
@@ -12796,24 +12895,90 @@ index b26edfe..e1d63e1 100644
 +    }
 +}
 +
++static void ov_save(void)
++{
++    ov_save_to_ini(0);
++}
++
++/* Leave: the window thread tears down and ends the process, as when the
++ * window is closed. */
++static void request_exit(void)
++{
++    fprintf(stderr, "  [FBWIN] exit to Windows\n");
++    InterlockedExchange(&s_fb_closed, 1);
++    InterlockedExchange(&s_fb_running, 0);
++}
++
++/* "Restart now": save, start this program again (it opens on the launcher,
++ * where there is one), and leave. The new copy writes to the same log. */
++static void restart_program(void)
++{
++    char exe[MAX_PATH], cmd[MAX_PATH + 4];
++    STARTUPINFOA si;
++    PROCESS_INFORMATION pi;
++
++    ov_save_to_ini(1);
++    if (!GetModuleFileNameA(NULL, exe, sizeof exe)) {
++        ov_status("Could not restart");
++        return;
++    }
++    snprintf(cmd, sizeof cmd, "\"%s\"", exe);
++    memset(&si, 0, sizeof si);
++    si.cb = sizeof si;
++    si.dwFlags = STARTF_USESTDHANDLES;
++    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
++    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
++    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
++    fflush(NULL);
++    if (!CreateProcessA(exe, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
++        fprintf(stderr, "  [FBWIN] restart failed (error %lu)\n", GetLastError());
++        ov_status("Could not restart");
++        return;
++    }
++    CloseHandle(pi.hThread);
++    CloseHandle(pi.hProcess);
++    fprintf(stderr, "  [FBWIN] restarting to apply settings\n");
++    request_exit();
++}
++
++static void launcher_page(int page, int sel)
++{
++    InterlockedExchange(&s_launcher, page);
++    s_ov.sel = sel;
++    s_ov.dirty = 1;
++}
++
++static void launcher_play(void)
++{
++    ov_save_to_ini(1);
++    fprintf(stderr, "  [FBWIN] launcher: play\n");
++    InterlockedExchange(&s_launcher, LAUNCHER_OFF);
++    s_ov.dirty = 1;
++    if (s_launcher_play)
++        SetEvent(s_launcher_play);
++}
++
 +static void ov_change(HWND hwnd, int dir)
 +{
 +    int i;
-+    switch (s_ov.sel) {
++    switch (ov_current()) {
 +    case OV_FULLSCREEN: toggle_fullscreen(hwnd); break;
 +    case OV_VSYNC:      s_cfg.vsync = !s_cfg.vsync; break;
 +    case OV_FILTER:     s_cfg.filter = (s_cfg.filter + 3 + dir) % 3; break;
 +    case OV_SCALE:      s_cfg.scale = (s_cfg.scale + 3 + dir) % 3; break;
 +    case OV_GPU:
 +        s_gpu_pending = !(s_gpu_pending < 0 ? s_cfg.gpu : s_gpu_pending);
++        if (s_launcher)                         /* nothing has started yet */
++            s_cfg.gpu = s_gpu_pending;
 +        break;
 +    case OV_RENDER:
-+        if (!s_render_pending)
-+            s_render_pending = s_cfg.render_scale;
-+        s_render_pending = (s_render_pending - 1 + 4 + dir) % 4 + 1;
++        /* Live: the GPU back end takes it at its next flip. */
++        *(volatile int *)&s_cfg.render_scale = (s_cfg.render_scale - 1 + 4 + dir) % 4 + 1;
 +        break;
 +    case OV_WIDE:
 +        s_wide_pending = !(s_wide_pending < 0 ? s_cfg.widescreen : s_wide_pending);
++        if (s_launcher)
++            s_cfg.widescreen = s_wide_pending;
 +        break;
 +    case OV_ANISO: {                        /* Off, 2, 4, 8, 16, around */
 +        int step = s_cfg.anisotropy ? (s_cfg.anisotropy >= 16 ? 4 : s_cfg.anisotropy >= 8 ? 3
@@ -12844,19 +13009,37 @@ index b26edfe..e1d63e1 100644
 +    s_ov.dirty = 1;
 +}
 +
++/* Back out one level: the launcher's settings to its title card (saving
++ * them), or the overlay closed. */
++static void ov_back(void)
++{
++    if (s_launcher == LAUNCHER_SETTINGS) {
++        ov_save_to_ini(1);
++        launcher_page(LAUNCHER_CARD, 1);
++    } else if (!s_launcher) {
++        ov_set_open(0);
++    }
++}
++
 +static void ov_activate(HWND hwnd)
 +{
-+    switch (s_ov.sel) {
++    switch (ov_current()) {
 +    case OV_SCREENSHOT: take_screenshot(); ov_status(s_notice); break;
 +    case OV_SAVE:       ov_save(); break;
++    case OV_RESTART:    restart_program(); break;
++    case OV_EXIT:       request_exit(); break;
 +    case OV_CLOSE:      ov_set_open(0); break;
++    case OV_PLAY:       launcher_play(); break;
++    case OV_SETTINGS:   launcher_page(LAUNCHER_SETTINGS, 0); break;
++    case OV_BACK:       ov_back(); break;
 +    default:            ov_change(hwnd, +1); break;
 +    }
 +}
 +
 +static void ov_move(int dir)
 +{
-+    s_ov.sel = (s_ov.sel + OV_COUNT + dir) % OV_COUNT;
++    int rows[OV_MAX_ROWS], n = ov_rows(rows);
++    s_ov.sel = (s_ov.sel + n + dir) % n;
 +    s_ov.dirty = 1;
 +}
 +
@@ -12867,7 +13050,7 @@ index b26edfe..e1d63e1 100644
 +        ov_set_open(!s_ov_open);
 +        return;
 +    }
-+    if (!s_ov_open)
++    if (!s_ov_open && !s_launcher)
 +        return;
 +    switch (vk) {
 +    case VK_UP:     ov_move(-1); break;
@@ -12877,13 +13060,36 @@ index b26edfe..e1d63e1 100644
 +    case VK_RETURN:
 +    case VK_SPACE:  ov_activate(hwnd); break;
 +    case VK_ESCAPE:
-+    case VK_BACK:   ov_set_open(0); break;
++    case VK_BACK:   ov_back(); break;
++    }
++}
++
++/* The mouse (fb_wndproc): over a row selects it; a click applies or changes
++ * it, a right-click changes it the other way. */
++static void ov_mouse(HWND hwnd, int x, int y, int button)
++{
++    POINT pt;
++    int i;
++    pt.x = x;
++    pt.y = y;
++    for (i = 0; i < s_ov.nhit; i++) {
++        if (!PtInRect(&s_ov.hit[i], pt))
++            continue;
++        if (s_ov.sel != i) {
++            s_ov.sel = i;
++            s_ov.dirty = 1;
++        }
++        if (button > 0)
++            ov_activate(hwnd);
++        else if (button < 0)
++            ov_change(hwnd, -1);
++        return;
 +    }
 +}
 +
 +/* The pad, read past the suspension. Back+Start opens or closes; in the
 + * menu the d-pad or left stick moves (repeating while held), A applies,
-+ * B or Start closes. */
++ * B or Start closes. On the launcher A or Start applies and B goes back. */
 +static void ov_poll_pad(HWND hwnd)
 +{
 +    enum { UP = 1, DOWN = 2, LEFT = 4, RIGHT = 8, START = 0x10, BACK = 0x20,
@@ -12913,17 +13119,17 @@ index b26edfe..e1d63e1 100644
 +            any |= g->bAnalogButtons[i] > 30;
 +        any |= (b & 0xF) != 0;
 +    }
-+    if (s_ov.release_wait && !s_ov_open && !any) {
++    if (s_ov.release_wait && !s_ov_open && !s_launcher && !any) {
 +        s_ov.release_wait = 0;
 +        xbox_InputSetSuspended(0);
 +    }
 +    pressed = b & ~prev;
-+    if ((b & (START | BACK)) == (START | BACK) && (pressed & (START | BACK))) {
++    if (!s_launcher && (b & (START | BACK)) == (START | BACK) && (pressed & (START | BACK))) {
 +        ov_set_open(!s_ov_open);
 +        prev = b;
 +        return;
 +    }
-+    if (s_ov_open) {
++    if (s_ov_open || s_launcher) {
 +        unsigned dirs = b & 0xF;
 +        if (dirs && dirs == (prev & 0xF)) {
 +            if (now - held_since > 400 && now - last_repeat > 120) {
@@ -12937,9 +13143,19 @@ index b26edfe..e1d63e1 100644
 +        if (pressed & DOWN)  ov_move(+1);
 +        if (pressed & LEFT)  ov_change(hwnd, -1);
 +        if (pressed & RIGHT) ov_change(hwnd, +1);
-+        if (pressed & A)     ov_activate(hwnd);
-+        if ((pressed & B) || ((pressed & START) && !(b & BACK)))
-+            ov_set_open(0);
++        if (s_launcher) {
++            if (pressed & (A | START)) {
++                /* Play: the title must not read this press as its own. */
++                if (ov_current() == OV_PLAY)
++                    s_ov.release_wait = 1, xbox_InputSetSuspended(1);
++                ov_activate(hwnd);
++            }
++            if (pressed & B) ov_back();
++        } else {
++            if (pressed & A)     ov_activate(hwnd);
++            if ((pressed & B) || ((pressed & START) && !(b & BACK)))
++                ov_set_open(0);
++        }
 +    }
 +    prev = b;
 +}
@@ -12957,19 +13173,22 @@ index b26edfe..e1d63e1 100644
 +    DrawTextA(s_ov.dc, s, -1, &r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 +}
 +
-+/* The project's logo, for the overlay's left column: an RCDATA resource
-+ * named RECOMP_OVERLAY_LOGO in the exe (a PNG, decoded with WIC), cropped to
-+ * the area that is not black. Embedded rather than loaded from a path, so a
-+ * packaged build needs no assets folder beside it. A project without one
-+ * gets the menu alone. */
-+static struct {
++/* The project's art: RCDATA resources in the exe (PNGs, decoded with WIC),
++ * each cropped to the area that is not black. RECOMP_OVERLAY_LOGO goes in
++ * the overlay's left column; RECOMP_TITLE_CARD (a wordmark) and
++ * RECOMP_TITLE_MARK (the author's mark) make the launcher's title card.
++ * Embedded rather than loaded from a path, so a packaged build needs no
++ * assets folder beside it. A project without them gets the menus alone. */
++typedef struct {
 +    int     tried;
 +    HDC     dc;
 +    HBITMAP bmp, old;
 +    int     w, h;
-+} s_logo;
++} Art;
 +
-+static void logo_load(void)
++static Art s_logo, s_card, s_mark;
++
++static void art_load(Art *art, const char *name)
 +{
 +    IWICImagingFactory *fac = NULL;
 +    IWICStream *st = NULL;
@@ -12985,10 +13204,10 @@ index b26edfe..e1d63e1 100644
 +    int x, y, x0, y0, x1, y1, m, cw, chh;
 +    HRESULT co;
 +
-+    if (s_logo.tried)
++    if (art->tried)
 +        return;
-+    s_logo.tried = 1;
-+    res = FindResourceA(NULL, "RECOMP_OVERLAY_LOGO", (LPCSTR)RT_RCDATA);
++    art->tried = 1;
++    res = FindResourceA(NULL, name, (LPCSTR)RT_RCDATA);
 +    if (!res)
 +        return;
 +    mem = LoadResource(NULL, res);
@@ -13047,9 +13266,9 @@ index b26edfe..e1d63e1 100644
 +        bi.bmiHeader.biPlanes = 1;
 +        bi.bmiHeader.biBitCount = 32;
 +        bi.bmiHeader.biCompression = BI_RGB;
-+        s_logo.bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&dst, NULL, 0);
++        art->bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&dst, NULL, 0);
 +    }
-+    if (!s_logo.bmp)
++    if (!art->bmp)
 +        goto out;
 +    for (y = 0; y < chh; y++)                       /* over black */
 +        for (x = 0; x < cw; x++) {
@@ -13059,11 +13278,11 @@ index b26edfe..e1d63e1 100644
 +                | ((((p >> 8) & 0xFF) * a / 255u) << 8)
 +                | ((p & 0xFF) * a / 255u);
 +        }
-+    s_logo.dc = CreateCompatibleDC(NULL);
-+    s_logo.old = (HBITMAP)SelectObject(s_logo.dc, s_logo.bmp);
-+    s_logo.w = cw;
-+    s_logo.h = chh;
-+    fprintf(stderr, "  [FBWIN] overlay logo %dx%d (from %ux%u)\n", cw, chh, w, h);
++    art->dc = CreateCompatibleDC(NULL);
++    art->old = (HBITMAP)SelectObject(art->dc, art->bmp);
++    art->w = cw;
++    art->h = chh;
++    fprintf(stderr, "  [FBWIN] %s %dx%d (from %ux%u)\n", name, cw, chh, w, h);
 +
 +out:
 +    free(px);
@@ -13076,14 +13295,112 @@ index b26edfe..e1d63e1 100644
 +        CoUninitialize();
 +}
 +
++static void logo_load(void)
++{
++    art_load(&s_logo, "RECOMP_OVERLAY_LOGO");
++}
++
++static void art_free(Art *art)
++{
++    if (art->dc) {
++        SelectObject(art->dc, art->old);
++        DeleteObject(art->bmp);
++        DeleteDC(art->dc);
++        art->dc = NULL;
++    }
++}
++
 +static void logo_free(void)
 +{
-+    if (s_logo.dc) {
-+        SelectObject(s_logo.dc, s_logo.old);
-+        DeleteObject(s_logo.bmp);
-+        DeleteDC(s_logo.dc);
-+        s_logo.dc = NULL;
++    art_free(&s_logo);
++    art_free(&s_card);
++    art_free(&s_mark);
++}
++
++/* Draw art into a box, as large as fits with its shape kept, centred. */
++static void art_draw(const Art *art, const RECT *box)
++{
++    int bw = box->right - box->left, bh = box->bottom - box->top, dw, dh;
++    if (!art->dc || bw < 1 || bh < 1)
++        return;
++    dw = bw;
++    dh = (int)((long long)art->h * bw / art->w);
++    if (dh > bh) {
++        dh = bh;
++        dw = (int)((long long)art->w * bh / art->h);
 +    }
++    SetStretchBltMode(s_ov.dc, HALFTONE);
++    SetBrushOrgEx(s_ov.dc, 0, 0, NULL);
++    StretchBlt(s_ov.dc, box->left + (bw - dw) / 2, box->top + (bh - dh) / 2, dw, dh,
++               art->dc, 0, 0, art->w, art->h, SRCCOPY);
++}
++
++static HFONT ui_font(int px, int weight)
++{
++    return CreateFontA(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
++                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
++                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
++}
++
++/* The launcher's title card: the wordmark, the menu under it, the version
++ * at the bottom left and the author's mark at the bottom right. */
++static void launcher_card(int cw, int ch)
++{
++    int rows[OV_MAX_ROWS], n = ov_rows(rows), i, fh, row, menu_w, top;
++    HFONT big, fine, oldf;
++    RECT r;
++
++    art_load(&s_card, "RECOMP_TITLE_CARD");
++    art_load(&s_mark, "RECOMP_TITLE_MARK");
++    fh = ch / 20;
++    if (fh > 44) fh = 44;
++    if (fh < 14) fh = 14;
++    row = fh * 2;
++    big = ui_font(fh, FW_SEMIBOLD);
++    fine = ui_font(fh * 3 / 5 < 11 ? 11 : fh * 3 / 5, FW_NORMAL);
++    oldf = (HFONT)SelectObject(s_ov.dc, big);
++
++    /* The wordmark, across the upper half; the game's name in text when the
++     * exe carries no art. */
++    SetRect(&r, cw / 10, ch / 10, cw - cw / 10, ch * 44 / 100);
++    if (s_card.dc)
++        art_draw(&s_card, &r);
++    else
++        ov_text(s_cfg.title, r, DT_CENTER, RGB(220, 40, 40));
++
++    menu_w = fh * 12;
++    top = ch * 52 / 100;
++    s_ov.nhit = 0;
++    for (i = 0; i < n; i++) {
++        const char *label;
++        char value[48];
++        int sel = i == s_ov.sel;
++        SetRect(&r, (cw - menu_w) / 2, top + row * i, (cw + menu_w) / 2, top + row * i + row * 4 / 5);
++        if (sel) {
++            RECT bar;
++            ov_fill(&r, RGB(70, 30, 34));
++            SetRect(&bar, r.left, r.top, r.left + fh / 6, r.bottom);
++            ov_fill(&bar, RGB(220, 40, 40));
++        }
++        ov_item(rows[i], &label, value, sizeof value);
++        ov_text(label, r, DT_CENTER, sel ? RGB(255, 255, 255) : RGB(150, 154, 165));
++        s_ov.hit[s_ov.nhit++] = r;
++    }
++
++    SelectObject(s_ov.dc, fine);
++    SetRect(&r, fh, ch - fh * 2, cw / 2, ch - fh / 2);
++    ov_text(s_launcher_version, r, DT_LEFT, RGB(110, 114, 125));
++    SetRect(&r, cw / 4, ch - fh * 2, cw - cw / 4, ch - fh / 2);
++    ov_text("Enter / A: select     Arrows / D-pad: move",
++            r, DT_CENTER | DT_END_ELLIPSIS, RGB(110, 114, 125));
++    if (s_mark.dc) {
++        int mh = ch / 9;
++        SetRect(&r, cw - fh - mh * 3, ch - fh / 2 - mh, cw - fh, ch - fh / 2);
++        art_draw(&s_mark, &r);
++    }
++    SelectObject(s_ov.dc, oldf);
++    DeleteObject(big);
++    DeleteObject(fine);
 +}
 +
 +/* Draw the overlay for a cw x ch client area if it changed. Returns
@@ -13091,7 +13408,7 @@ index b26edfe..e1d63e1 100644
 +static int ov_prepare(int cw, int ch)
 +{
 +    HFONT font, bold, oldf;
-+    int fh, x, y, k;
++    int fh, x, y, k, rows[OV_MAX_ROWS], n = ov_rows(rows);
 +    uint32_t a;
 +
 +    if (cw < 1 || ch < 1)
@@ -13124,6 +13441,9 @@ index b26edfe..e1d63e1 100644
 +    }
 +    memset(s_ov.bits, 0, (size_t)cw * ch * 4);
 +    s_ov.nrects = 0;
++    s_ov.nhit = 0;
++    if (s_ov.sel >= n)
++        s_ov.sel = n - 1;
 +
 +    /* Text size: whatever lets the whole panel fit -- 1.5 text heights a
 +     * row, three rows of title and footer, and a margin; 26 wide for the
@@ -13132,21 +13452,24 @@ index b26edfe..e1d63e1 100644
 +    logo_load();
 +    {
 +        int across = 26 + (s_logo.dc ? 17 : 0) + 2;
-+        int by_h = ch * 2 / (3 * (OV_COUNT + 3) + 4), by_w = cw / across;
++        int by_h = ch * 2 / (3 * (n + 3) + 4), by_w = cw / across;
 +        fh = by_h < by_w ? by_h : by_w;
 +        if (fh > 22) fh = 22;
 +        if (fh < 10) fh = 10;
 +    }
-+    font = CreateFontA(-fh, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-+                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
-+    bold = CreateFontA(-fh * 5 / 4, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
-+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-+                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
++    font = ui_font(fh, FW_NORMAL);
++    bold = ui_font(fh * 5 / 4, FW_BOLD);
 +    oldf = (HFONT)SelectObject(s_ov.dc, font);
 +    SetBkMode(s_ov.dc, TRANSPARENT);
 +
-+    if (s_cfg.fps_counter && s_ov.fps[0]) {
++    if (s_launcher) {
++        /* The launcher fills the window: black, then its page. */
++        RECT all;
++        SetRect(&all, 0, 0, cw, ch);
++        ov_fill(&all, RGB(0, 0, 0));
++        if (s_launcher == LAUNCHER_CARD)
++            launcher_card(cw, ch);
++    } else if (s_cfg.fps_counter && s_ov.fps[0]) {
 +        RECT r;
 +        SetRect(&r, fh / 2, fh / 2, fh / 2 + fh * 5, fh / 2 + fh * 3 / 2);
 +        ov_fill(&r, RGB(0, 0, 0));
@@ -13154,30 +13477,22 @@ index b26edfe..e1d63e1 100644
 +        s_ov.rects[s_ov.nrects++] = r;
 +    }
 +
-+    if (s_ov_open) {
++    if (s_ov_open || s_launcher == LAUNCHER_SETTINGS) {
 +        int row = fh * 3 / 2, pad = fh, lw = s_logo.dc ? fh * 17 : 0;
 +        int pw = fh * 26 + lw, ph, i, ml;
 +        RECT p, r;
 +        if (pw > cw - fh) pw = cw - fh;
-+        ph = row * (OV_COUNT + 3) + pad;
++        ph = row * (n + 3) + pad;
 +        SetRect(&p, (cw - pw) / 2, (ch - ph) / 2, (cw + pw) / 2, (ch - ph) / 2 + ph);
 +        ov_fill(&p, RGB(16, 18, 26));
 +
 +        /* The logo, on black like the art itself, scaled to its column. */
 +        if (lw) {
-+            int aw = lw - 2 * pad, ah = ph - 2 * pad, dw, dh;
++            RECT box;
 +            SetRect(&r, p.left, p.top, p.left + lw, p.bottom);
 +            ov_fill(&r, RGB(0, 0, 0));
-+            dw = aw;
-+            dh = (int)((long long)s_logo.h * aw / s_logo.w);
-+            if (dh > ah) {
-+                dh = ah;
-+                dw = (int)((long long)s_logo.w * ah / s_logo.h);
-+            }
-+            SetStretchBltMode(s_ov.dc, HALFTONE);
-+            SetBrushOrgEx(s_ov.dc, 0, 0, NULL);
-+            StretchBlt(s_ov.dc, p.left + (lw - dw) / 2, p.top + (ph - dh) / 2, dw, dh,
-+                       s_logo.dc, 0, 0, s_logo.w, s_logo.h, SRCCOPY);
++            SetRect(&box, r.left + pad, r.top + pad, r.right - pad, r.bottom - pad);
++            art_draw(&s_logo, &box);
 +        }
 +        ml = p.left + lw;                               /* the menu's left edge */
 +        SetRect(&r, p.left, p.top, p.right, p.top + fh / 5);
@@ -13195,17 +13510,19 @@ index b26edfe..e1d63e1 100644
 +        }
 +        SelectObject(s_ov.dc, font);
 +
-+        for (i = 0; i < OV_COUNT; i++) {
++        for (i = 0; i < n; i++) {
 +            const char *label;
 +            char value[48], shown[64];
 +            int sel = i == s_ov.sel;
 +            SetRect(&r, ml + pad / 2, p.top + row * 3 / 2 + row * i,
 +                    p.right - pad / 2, p.top + row * 3 / 2 + row * (i + 1));
++            s_ov.hit[s_ov.nhit++] = r;
 +            if (sel)
 +                ov_fill(&r, RGB(70, 30, 34));
-+            ov_item(i, &label, value, sizeof value);
++            ov_item(rows[i], &label, value, sizeof value);
 +            r.left += pad / 2; r.right -= pad / 2;
-+            ov_text(label, r, DT_LEFT, sel ? RGB(255, 255, 255) : RGB(190, 194, 205));
++            ov_text(label, r, DT_LEFT, sel ? RGB(255, 255, 255)
++                    : rows[i] == OV_RESTART ? RGB(255, 210, 120) : RGB(190, 194, 205));
 +            if (value[0]) {
 +                snprintf(shown, sizeof shown, sel ? "<  %s  >" : "%s", value);
 +                ov_text(shown, r, DT_RIGHT, sel ? RGB(255, 210, 120) : RGB(150, 200, 255));
@@ -13216,7 +13533,8 @@ index b26edfe..e1d63e1 100644
 +        if ((LONG)(s_ov.status_until - GetTickCount()) > 0)
 +            ov_text(s_ov.status, r, DT_LEFT | DT_END_ELLIPSIS, RGB(140, 255, 140));
 +        else
-+            ov_text("Arrows/D-pad: move   Enter/A: apply   Esc/B: close",
++            ov_text(s_launcher ? "Arrows/D-pad: move   Enter/A: change   Esc/B: back"
++                               : "Arrows/D-pad: move   Enter/A: apply   Esc/B: close",
 +                    r, DT_LEFT | DT_END_ELLIPSIS, RGB(130, 134, 145));
 +        s_ov.rects[s_ov.nrects++] = p;
 +    }
@@ -13225,14 +13543,23 @@ index b26edfe..e1d63e1 100644
 +    DeleteObject(font);
 +    DeleteObject(bold);
 +
-+    /* GDI leaves alpha at zero; give each drawn box its opacity. */
-+    for (k = 0; k < s_ov.nrects; k++) {
++    /* GDI leaves alpha at zero; give each drawn box its opacity. The
++     * launcher covers the whole window, opaque. */
++    if (s_launcher) {
++        for (k = 0; k < cw * ch; k++)
++            s_ov.bits[k] |= 0xFF000000u;
++    }
++    for (k = 0; !s_launcher && k < s_ov.nrects; k++) {
 +        const RECT *r = &s_ov.rects[k];
 +        a = (k == s_ov.nrects - 1 && s_ov_open) ? 0xEEu : 0xC0u;
 +        for (y = r->top < 0 ? 0 : r->top; y < r->bottom && y < ch; y++)
 +            for (x = r->left < 0 ? 0 : r->left; x < r->right && x < cw; x++)
 +                s_ov.bits[(size_t)y * cw + x] =
 +                    (s_ov.bits[(size_t)y * cw + x] & 0xFFFFFFu) | (a << 24);
++    }
++    if (s_launcher) {
++        s_ov.nrects = 1;
++        SetRect(&s_ov.rects[0], 0, 0, cw, ch);
 +    }
 +    s_ov.dirty = 0;
 +    return 1;
@@ -13924,7 +14251,7 @@ index b26edfe..e1d63e1 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +2008,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -286,9 +2303,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -13950,7 +14277,7 @@ index b26edfe..e1d63e1 100644
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
-@@ -309,36 +2044,96 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -309,36 +2339,100 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
  
@@ -14013,7 +14340,11 @@ index b26edfe..e1d63e1 100644
 -                          0, 0, (int)s_fb_width, (int)s_fb_height,
 -                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
 +            have = 1;
-         }
++        } else if (s_launcher_used && s_rgb) {
++            /* The launcher, or black from Play until the title's first
++             * frame (s_rgb starts zeroed). */
++            have = 1;
++        }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
 +        xbox_PvideoTrace();
@@ -14051,13 +14382,13 @@ index b26edfe..e1d63e1 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
-+        }
+         }
 +        if (!use_d3d || !s_cfg.vsync || !(have && fresh))
 +            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,41 +2144,71 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -349,41 +2443,73 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -14109,7 +14440,9 @@ index b26edfe..e1d63e1 100644
 +                    snprintf(s_ov.fps, sizeof s_ov.fps, "%.0f FPS", fps);
 +                    s_ov.dirty = 1;
 +                }
-+                if ((LONG)(s_notice_until - now) <= 0) {
++                if (s_launcher) {
++                    SetWindowTextA(hwnd, s_cfg.title);
++                } else if ((LONG)(s_notice_until - now) <= 0) {
 +                    wchar_t tb[160];
 +                    _snwprintf(tb, 159, L"%hs - %ls | FPS: %.1f | draws: %ld",
 +                               s_cfg.title, s_title, fps, (long)s_frame_draws);
@@ -14143,7 +14476,7 @@ index b26edfe..e1d63e1 100644
      return 0;
  }
  
-@@ -391,7 +2216,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -391,7 +2517,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -14152,6 +14485,66 @@ index b26edfe..e1d63e1 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
+@@ -402,4 +2528,44 @@ void xbox_FramebufferWindowStart(void)
+         InterlockedExchange(&s_fb_running, 0);
+ }
+ 
++/* The launcher: open the window on a title card -- the project's wordmark
++ * (RECOMP_TITLE_CARD), Play, Settings and Exit to Windows, the version and
++ * the author's mark (RECOMP_TITLE_MARK) -- and return once Play is chosen.
++ * Its settings are the overlay's, applied straight away since nothing has
++ * started (renderer and widescreen included), and saved on the way out.
++ * Exit to Windows, or closing the window, ends the process. Returns at once
++ * without a window (RECOMP_FB_WINDOW unset, or it could not be opened). */
++void xbox_LauncherRun(const char *version)
++{
++    cfg_load_once();
++    if (!getenv("RECOMP_FB_WINDOW") || s_fb_running)
++        return;
++    snprintf(s_launcher_version, sizeof s_launcher_version, "%s %s",
++             s_cfg.title, version ? version : "");
++    s_launcher_play = CreateEventA(NULL, TRUE, FALSE, NULL);
++    if (!s_launcher_play)
++        return;
++    s_launcher_used = 1;
++    s_ov.sel = 0;
++    s_ov.dirty = 1;
++    InterlockedExchange(&s_launcher, LAUNCHER_CARD);
++    fprintf(stderr, "  [FBWIN] launcher: title card\n");
++    xbox_FramebufferWindowStart();
++    /* Until Play. Exit to Windows or closing the window ends the process
++     * from the window thread; a window that never opened lets the title
++     * start as it would have without one. */
++    while (WaitForSingleObject(s_launcher_play, 100) == WAIT_TIMEOUT)
++        if (!s_fb_running && !s_fb_closed)
++            break;
++    InterlockedExchange(&s_launcher, LAUNCHER_OFF);
++}
++
++/* Whether the GPU back end should draw, as the launcher left it (or as the
++ * ini and RECOMP_PB_BACKEND said). */
++int xbox_FramebufferWindowGpu(void)
++{
++    cfg_load_once();
++    return s_cfg.gpu;
++}
++
+ #endif /* _WIN32: POSIX hosts get the SDL2 window in fb_present_sdl.c */
+diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
+index 87b7ef7..2a10f70 100644
+--- a/src/video/fb_present_sdl.c
++++ b/src/video/fb_present_sdl.c
+@@ -101,6 +101,10 @@ void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+ /* The window is opened by xbox_HostWindowMain, on the main thread. */
+ void xbox_FramebufferWindowStart(void) {}
+ 
++/* ponytail: no launcher in the SDL window yet; the title starts at once. */
++void xbox_LauncherRun(const char *version) { (void)version; }
++int  xbox_FramebufferWindowGpu(void) { return 0; }
++
+ /* The back slot is filled: make it the ready one. An unshown ready frame is
+  * overwritten (dropped), never waited for. */
+ static void publish(uint32_t bpp)
 diff --git a/src/video/pvideo_overlay.c b/src/video/pvideo_overlay.c
 new file mode 100644
 index 0000000..696e4e3
@@ -14569,3 +14962,19 @@ index 0000000..696e4e3
 +void     xbox_PvideoTrace(void) {}
 +uint32_t xbox_PvideoChangeCount(void) { return 0; }
 +#endif
+diff --git a/src/video/video_player.h b/src/video/video_player.h
+index a5b912c..303da19 100644
+--- a/src/video/video_player.h
++++ b/src/video/video_player.h
+@@ -59,6 +59,11 @@ int  video_dump_frame_bmp(const char *path);
+ /* Show the guest framebuffer in its own window (RECOMP_FB_WINDOW). Whatever
+  * the title renders into guest RAM appears there; nothing else scans it out. */
+ void xbox_FramebufferWindowStart(void);
++/* Open the window on a launcher (title card, Play / Settings / Exit to
++ * Windows) and return when Play is chosen. Exit ends the process. */
++void xbox_LauncherRun(const char *version);
++/* The renderer the settings (and the launcher) chose: 1 for the GPU back end. */
++int  xbox_FramebufferWindowGpu(void);
+ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
+ /* Rows per displayed row: 2 for a 2x2 anti-aliased surface, else 1. */
+ void xbox_FramebufferWindowSetAA(uint32_t sy);

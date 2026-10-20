@@ -166,7 +166,13 @@ static void dr_default_env(void)
     /* The renderer: the GPU back end unless [display] renderer=software.
      * Settled here, before anything asks, because the back end is chosen
      * once. The ini is the one the window reads (fb_present.c): RECOMP_INI,
-     * then the working directory, then beside the exe. */
+     * then the working directory, then beside the exe. DR_PB_BACKEND_SET
+     * marks a value set here rather than by you: a copy started by "Restart
+     * now" inherits it and must read the ini again. */
+    if (getenv("DR_PB_BACKEND_SET")) {
+        _putenv_s("RECOMP_PB_BACKEND", "");
+        _putenv_s("DR_PB_BACKEND_SET", "");
+    }
     if (!getenv("RECOMP_PB_BACKEND")) {
         char ini[MAX_PATH], val[32], *slash;
         const char *v = getenv("RECOMP_INI");
@@ -187,7 +193,34 @@ static void dr_default_env(void)
         }
         GetPrivateProfileStringA("display", "renderer", "gpu", val, sizeof val, ini);
         _putenv_s("RECOMP_PB_BACKEND", _stricmp(val, "software") ? "d3d11" : "cpu");
+        _putenv_s("DR_PB_BACKEND_SET", "1");
     }
+}
+
+/* The launcher: a title card with Play, Settings and Exit to Windows before
+ * the game starts (xboxrecomp fb_present.c). On in a release build, off in a
+ * developer build so scripted runs start straight away; RECOMP_LAUNCHER=1 or
+ * 0 says otherwise. The renderer picked there replaces the ini's, unless you
+ * set RECOMP_PB_BACKEND yourself. */
+#ifndef DR_VERSION
+#define DR_VERSION "dev"
+#endif
+extern void xbox_LauncherRun(const char *version);
+extern int xbox_FramebufferWindowGpu(void);
+
+static void dr_launcher(void)
+{
+    const char *v = getenv("RECOMP_LAUNCHER");
+#ifdef DR_RELEASE
+    int on = !(v && !strcmp(v, "0"));
+#else
+    int on = v && strcmp(v, "0") != 0;
+#endif
+    if (!on)
+        return;
+    xbox_LauncherRun(DR_VERSION);
+    if (getenv("DR_PB_BACKEND_SET"))
+        _putenv_s("RECOMP_PB_BACKEND", xbox_FramebufferWindowGpu() ? "d3d11" : "cpu");
 }
 
 /* ── Forward declarations ──────────────────────────────────── */
@@ -560,6 +593,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             return 1;
         }
     }
+    dr_launcher();
 
     /* Step 2: Initialize Xbox memory layout */
     printf("Initializing Xbox memory layout...\n");
