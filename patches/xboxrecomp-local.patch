@@ -3000,10 +3000,10 @@ index 0000000..d0b2adc
 +#endif
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
 new file mode 100644
-index 0000000..7b0301c
+index 0000000..885f70e
 --- /dev/null
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
-@@ -0,0 +1,3938 @@
+@@ -0,0 +1,4017 @@
 +#include "nv2a_gpu.h"
 +#include <d3d11.h>
 +#include <d3d11_1.h>
@@ -3062,6 +3062,7 @@ index 0000000..7b0301c
 +    uint64_t fixed_draws, lit_draws, skinned_draws, texgen_draws, texture_matrix_draws;
 +    uint64_t signed_texture_stages, packed_texture_stages;
 +    uint64_t window_clip_draws, window_scissor_draws, window_shader_draws, window_exclusive_draws;
++    uint64_t decal_slack_draws;   /* [dz1] */
 +    uint64_t line_primitives, point_primitives;
 +    uint64_t sync_calls, target_evictions;
 +    uint64_t native_clears, clear_fallbacks;
@@ -3173,6 +3174,8 @@ index 0000000..7b0301c
 +    std::fprintf(stderr, "[GPU-D3D11] window clip: %llu configured draws, %llu scissor-only, %llu pixel-union, %llu exclusive\n",
 +                 (unsigned long long)gpu_timing.window_clip_draws, (unsigned long long)gpu_timing.window_scissor_draws,
 +                 (unsigned long long)gpu_timing.window_shader_draws, (unsigned long long)gpu_timing.window_exclusive_draws);
++    std::fprintf(stderr, "[GPU-D3D11] decal slack: %llu draws (RECOMP_GPU_DECAL_SLACK)\n",
++                 (unsigned long long)gpu_timing.decal_slack_draws);
 +    std::fprintf(stderr, "[GPU-D3D11] surface bytes: color copied %.3f GiB published %.3f GiB; depth published %.3f GiB converted %.3f GiB\n",
 +                 (double)gpu_timing.color_copy_bytes / 1073741824.0, (double)gpu_timing.color_publish_bytes / 1073741824.0,
 +                 (double)gpu_timing.depth_publish_bytes / 1073741824.0, (double)gpu_timing.depth_convert_bytes / 1073741824.0);
@@ -5159,6 +5162,9 @@ index 0000000..7b0301c
 +    if (!surface->dirty && surface->needs_refresh) refresh_surface(*surface);
 +    HRESULT acquired = p.mutex->AcquireSync(0, 0);
 +    if (acquired != S_OK) acquired = p.mutex->AcquireSync(1, 0);   /* the window never took the last one */
++    /* The window holds it only for one texture copy: worth a short wait
++     * rather than dropping the frame (speed1 dropped 1 in 60). */
++    if (acquired != S_OK) acquired = p.mutex->AcquireSync(0, 4);
 +    if (acquired != S_OK) { p.skipped++; return; }
 +    bool drawn = scaled_blit(surface->view.Get(), p.target.Get(), width, height, nullptr);
 +    p.mutex->ReleaseSync(1);
@@ -6359,6 +6365,28 @@ index 0000000..7b0301c
 +    return true;
 +}
 +
++/* [gx21] The refusals that used to return 0 without a word, named, with the
++ * batch's state for the first few of each. Deathrow's visibility tests (the
++ * glows on the goal and disc lights) all went to the CPU through one of
++ * them. */
++static int quiet_refusal(const char *reason, const Nv2aGpuDraw *state, uint32_t count)
++{
++    static const char *seen[16];
++    static unsigned times[16];
++    unsigned slot = 0;
++    while (slot < 16 && seen[slot] && seen[slot] != reason) slot++;
++    if (slot < 16) {
++        seen[slot] = reason;
++        if (times[slot]++ < 6 && state)
++            std::fprintf(stderr, "[GPU-D3D11] refused: %s | count %u topology %u color %p %ux%u pitch %u bpp %u "
++                         "depth %u func %X mask %u control0 %08X combiners %u\n",
++                         reason, count, state->topology, (void *)state->color, state->width, state->height,
++                         state->pitch, state->bytes_per_pixel, state->depth_enable, state->depth_function,
++                         state->depth_mask, state->control0, state->combiners.control & 255u);
++    }
++    return 0;
++}
++
 +extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices, uint32_t count)
 +{
 +    drop_released_targets();
@@ -6368,9 +6396,14 @@ index 0000000..7b0301c
 +        std::fprintf(stderr, "[GPU-D3D11] rejected: %s\n", reason);
 +        return 0;
 +    };
-+    if (!state || !vertices || !count || count > NV2A_GPU_MAX_VERTICES || !state->color || !state->width || !state->height ||
-+        state->width > 4096 || state->height > 4096 || state->pitch < state->width * 4 || state->bytes_per_pixel != 4 ||
-+        (state->combiners.control & 255u) > 8 || !initialize_pipeline()) return 0;
++    if (!state || !vertices || !count || count > NV2A_GPU_MAX_VERTICES)
++        return quiet_refusal("no batch or too many vertices", state, count);
++    if (!state->color || !state->width || !state->height || state->width > 4096 || state->height > 4096)
++        return quiet_refusal("no colour target or bad size", state, count);
++    if (state->pitch < state->width * 4 || state->bytes_per_pixel != 4)
++        return quiet_refusal("colour target not 32-bit", state, count);
++    if ((state->combiners.control & 255u) > 8 || !initialize_pipeline())
++        return quiet_refusal("combiner stages or pipeline", state, count);
 +    if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
 +    uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
 +                               state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
@@ -6421,7 +6454,10 @@ index 0000000..7b0301c
 +        if (!state->vertex_program && state->fog_gen_mode >= 1 && state->fog_gen_mode <= 3 && !state->fixed_transform)
 +            return reject("eye-space fog requires fixed transform");
 +    }
-+    if (state->depth_enable && ((state->control0 & 0x1000u) || state->depth_function < 0x200 || state->depth_function > 0x207)) return 0;
++    if (state->depth_enable && (state->control0 & 0x1000u))
++        return quiet_refusal("float depth (control0 bit 12)", state, count);
++    if (state->depth_enable && (state->depth_function < 0x200 || state->depth_function > 0x207))
++        return quiet_refusal("depth function", state, count);
 +    uint32_t depth_clamp = (state->zmin_max_control >> 4) & 15u;
 +    float depth_clip_min = state->depth_range_valid & 1u ? state->depth_clip_min : 0.0f;
 +    float depth_clip_max = state->depth_range_valid & 2u ? state->depth_clip_max : state->depth_format == 1 ? 65535.0f : 16777215.0f;
@@ -6439,6 +6475,25 @@ index 0000000..7b0301c
 +        if (!nv_cpu_finite(state->polygon_offset_scale) || !nv_cpu_finite(state->polygon_offset_bias))
 +            return reject("nonfinite polygon offset");
 +    }
++    /* [dz1] Decal slack. A pass painted over a surface already drawn (the
++     * light pools and streaks near Deathrow's goal and disc) tests EQUAL or
++     * LEQUAL with depth writes off. When it and the surface reach the same
++     * pixel through different transforms (vertex program against fixed
++     * function), their depths differ in the last bits and the test flips
++     * from frame to frame: the lights flicker. Such a pass, without a polygon
++     * offset of its own and not W-buffered, is pulled RECOMP_GPU_DECAL_SLACK
++     * depth units (e.g. 4 of 2^24) toward the eye, and EQUAL becomes LEQUAL
++     * -- what the CPU rasteriser's RECOMP_ZEPS does there. Opt-in: on
++     * Deathrow's light pools (texture 8009D000, glow2/trace1) it applied
++     * and changed nothing; the game draws a different set of floor tiles
++     * each frame, which is upstream of the renderer. */
++    static const float decal_slack = []() {
++        const char *value = std::getenv("RECOMP_GPU_DECAL_SLACK");
++        return value ? (float)std::atof(value) : 0.0f;
++    }();
++    const bool decal_pass = decal_slack > 0.0f && state->depth_enable && !state->depth_mask &&
++                            (state->depth_function == 0x202 || state->depth_function == 0x203) &&
++                            !front_offset && !back_offset && !(state->control0 & 0x10000u);
 +    if (state->stencil_enable && (state->depth_format != 2 || state->stencil_function < 0x200 || state->stencil_function > 0x207 ||
 +        !stencil_operation(state->stencil_fail) || !stencil_operation(state->stencil_depth_fail) || !stencil_operation(state->stencil_pass)))
 +        return reject("stencil format, comparison or operation");
@@ -6459,17 +6514,19 @@ index 0000000..7b0301c
 +    if (!make_rasterizer(*state, raster_state)) return reject("culling, front face or polygon fill");
 +    for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
 +        if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
-+            !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
++            !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3]))
++            return quiet_refusal("non-finite screen-space vertex", state, count);
 +    TargetExtent extent = reusable_target_extent(*state);
 +    prepare_target_cache(*state, extent);
 +    Surface *surface = get_surface(*state, true, extent);
-+    if (!surface) return 0;
++    if (!surface) return quiet_refusal("colour target creation", state, count);
 +    DepthSurface *depth = state->depth_enable || state->stencil_enable ? get_depth(*state, true, extent) : nullptr;
 +    if ((state->depth_enable || state->stencil_enable) && !depth) return reject("depth/stencil surface");
 +    D3D11_DEPTH_STENCIL_DESC depth_description = {};
 +    depth_description.DepthEnable = state->depth_enable != 0;
 +    depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
 +    depth_description.DepthFunc = state->depth_enable ? (D3D11_COMPARISON_FUNC)(state->depth_function - 0x1FF) : D3D11_COMPARISON_ALWAYS;
++    if (decal_pass) depth_description.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;   /* [dz1] */
 +    uint32_t depth_key = (depth_description.DepthEnable ? 8u : 0u) +
 +                        (depth_description.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL ? 16u : 0u) +
 +                        (uint32_t)depth_description.DepthFunc - 1u;
@@ -6542,6 +6599,24 @@ index 0000000..7b0301c
 +        std::memcpy(constants.light_diffuse, state->light_diffuse, sizeof constants.light_diffuse);
 +        std::memcpy(constants.light_specular, state->light_specular, sizeof constants.light_specular);
 +        std::memcpy(constants.light_local_position, state->light_local_position, sizeof constants.light_local_position);
++        {                                                          /* [lr1] */
++            /* RECOMP_FF_LIGHT_RANGE=0: local lights ignore their range (w).
++             * The shader drops a light per vertex beyond it, and a floor of
++             * big tiles then switches a moving light (Deathrow's disc glow)
++             * on and off a whole tile at a time. A/B for that flicker. */
++            static const bool range = []() {
++                const char *value = std::getenv("RECOMP_FF_LIGHT_RANGE");
++                return !value || std::strcmp(value, "0") != 0;
++            }();
++            static unsigned lit_draws;
++            if (!range)
++                for (uint32_t light = 0; light < 8; light++)
++                    constants.light_local_position[light][3] = 3.402823466e38f;
++            if (state->light_enable_mask && lit_draws++ < 4)
++                std::fprintf(stderr, "[GPU-D3D11] fixed-function lights: mask %08X, light 0 at %.1f %.1f %.1f range %g\n",
++                             state->light_enable_mask, state->light_local_position[0][0], state->light_local_position[0][1],
++                             state->light_local_position[0][2], state->light_local_position[0][3]);
++        }
 +        std::memcpy(constants.light_local_attenuation, state->light_local_attenuation, sizeof constants.light_local_attenuation);
 +        std::memcpy(constants.light_infinite_direction, state->light_infinite_direction, sizeof constants.light_infinite_direction);
 +        std::memcpy(constants.light_infinite_half_vector, state->light_infinite_half_vector, sizeof constants.light_infinite_half_vector);
@@ -6585,6 +6660,10 @@ index 0000000..7b0301c
 +    if (front_offset || back_offset) {
 +        constants.depth_offset[0] = state->polygon_offset_scale; constants.depth_offset[1] = state->polygon_offset_bias;
 +        constants.depth_offset[2] = front_offset ? 1.0f : 0.0f; constants.depth_offset[3] = back_offset ? 1.0f : 0.0f;
++    } else if (decal_pass) {                                     /* [dz1] */
++        constants.depth_offset[0] = 0.0f; constants.depth_offset[1] = -decal_slack;
++        constants.depth_offset[2] = constants.depth_offset[3] = 1.0f;
++        gpu_timing.decal_slack_draws++;
 +    }
 +    for (uint32_t stage = 0; stage < 8; stage++) {
 +        constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
@@ -7486,7 +7565,7 @@ index 0000000..e27083f
 +#endif
 \ No newline at end of file
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 1280565..6589cc0 100644
+index 1280565..353fd5d 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -39,6 +39,9 @@
@@ -10229,7 +10308,39 @@ index 1280565..6589cc0 100644
      }
      if (backend_draws())
          backend_flush(textured);
-@@ -3386,6 +5743,65 @@ static int imm_vertex_method(uint32_t method, uint32_t param)
+@@ -2981,16 +5338,31 @@ static void frame_trace_flip(void)
+             s_ftrace = 0;
+         return;
+     }
++    static int left;                                       /* [ft1] */
+     if (s_ftrace == 2) {
++        /* RECOMP_FRAME_TRACE_FRAMES=<n>: n consecutive frames per trigger,
++         * so a frame that differs from its neighbours (a flickering effect)
++         * can be diffed against them. */
++        /* With RECOMP_FB_DUMP set, each traced frame is also dumped, so the
++         * trace's frame k is <prefix>NNNNN.bmp in step with it. */
++        if (getenv("RECOMP_FB_DUMP"))
++            dump_surface_bmp();
++        if (--left > 0) {
++            fprintf(stderr, "[FTRACE] end of frame\n[FTRACE] frame begins (flip %u)\n", s_gpu.flips);
++            return;
++        }
+         s_ftrace = 3;
+         fprintf(stderr, "[FTRACE] end of frame\n");
+         return;
+     }
+     if (s_ftrace == 0) {
+         FILE *f = fopen(flag, "rb");
++        const char *n = getenv("RECOMP_FRAME_TRACE_FRAMES");
+         if (!f)
+             return;
+         fclose(f);
++        left = n ? atoi(n) : 1;
++        if (left < 1) left = 1;
+         s_ftrace = 2;
+         fprintf(stderr, "[FTRACE] frame begins (flip %u)\n", s_gpu.flips);
+     }
+@@ -3386,6 +5758,65 @@ static int imm_vertex_method(uint32_t method, uint32_t param)
      }
      return 0;
  }
@@ -10295,7 +10406,7 @@ index 1280565..6589cc0 100644
  /* The texture stage registers, all four stages. Stage i's registers are
   * 0x1B00 + 0x40*i onwards; only stage 0 used to be decoded, which was
   * enough for menus drawn one texture at a time and not for a 3D frame that
-@@ -3438,6 +5854,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+@@ -3438,6 +5869,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
          break;
      }
      tex_update_valid(t);
@@ -10304,7 +10415,7 @@ index 1280565..6589cc0 100644
      if (stage == 0)
          record_tex_reg(method, param);
  }
-@@ -3498,6 +5916,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3498,6 +5931,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -10320,7 +10431,7 @@ index 1280565..6589cc0 100644
      if (s_ftrace == 2) {
          /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
           * less the bulk (vertex data, program and constant uploads). */
-@@ -3554,6 +5981,17 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3554,6 +5996,17 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          *r = param;
          return;
      }
@@ -10338,7 +10449,7 @@ index 1280565..6589cc0 100644
      if (subch != 0) {                      /* 3D class lives on subchannel 0 */
          note_unhandled(method, param);
          return;
-@@ -3570,6 +6008,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3570,6 +6023,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case NV097_SET_SURFACE_FORMAT:
          s_gpu.format = param;
          surface_apply_clip();
@@ -10366,7 +10477,29 @@ index 1280565..6589cc0 100644
          break;
      case NV097_SET_SURFACE_PITCH:
          s_gpu.pitch = param & 0xFFFF;      /* colour pitch; zeta is the top half */
-@@ -3633,6 +6092,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3630,9 +6104,31 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
+         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
++        {                                                  /* [vt1] */
++            /* RECOMP_VIS_FORCE=1 answers every visibility test "fully
++             * visible", an A/B for Deathrow's light glows (missing on the
++             * CPU renderer, flickering on the GPU one). [VIS] logs the
++             * first reports and every 2000th: the count, and the GPU
++             * batches counted since the last one. */
++            static int force = -1;
++            static uint32_t gpu_batches_seen;
++            if (force < 0)
++                force = getenv("RECOMP_VIS_FORCE") != NULL;
++            if (s_gpu.reports <= 64 || !(s_gpu.reports % 2000))
++                fprintf(stderr, "[VIS] report %u: count %u (gpu batches since last %u)%s\n",
++                        s_gpu.reports, s_gpu.zpass_count,
++                        (uint32_t)(s_gpu_stat.zpass_batches - gpu_batches_seen),
++                        force ? " -> forced visible" : "");
++            gpu_batches_seen = (uint32_t)s_gpu_stat.zpass_batches;
++            if (force)
++                s_gpu.zpass_count = 100000u;
++        }
          memcpy(mem + at, &stamp, 8);
          memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
          memset(mem + at + 12, 0, 4);
@@ -10376,7 +10509,7 @@ index 1280565..6589cc0 100644
          break;
      }
      case NV097_SET_BLEND_COLOR:
-@@ -3649,7 +6111,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3649,7 +6145,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -10411,7 +10544,7 @@ index 1280565..6589cc0 100644
          if (param & 0x01)                         /* Z */
              zbuf_clear();
          break;
-@@ -3664,6 +6153,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3664,6 +6187,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              /* Three ways a batch can have arrived, and only one is in use at
               * a time: vertices completed by SET_VERTEX4F, a payload written
               * with INLINE_ARRAY, or indices into the title's own arrays. */
@@ -10419,7 +10552,7 @@ index 1280565..6589cc0 100644
              if (s_gpu.imm_count)
                  draw_immediate();
              else if (s_gpu.inline_count)
-@@ -3705,6 +6195,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3705,6 +6229,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  
      case NV097_ARRAY_ELEMENT16:
          /* Two 16-bit indices per parameter word. */
@@ -10431,7 +10564,7 @@ index 1280565..6589cc0 100644
          if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
-@@ -3737,16 +6232,30 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3737,16 +6266,30 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                           ? (s_gpu.flip_write + 1) % s_gpu.flip_modulo
                           : s_gpu.flip_write + 1;
          s_gpu.flips++;
@@ -10464,7 +10597,7 @@ index 1280565..6589cc0 100644
          /* And this is a completed swap, which is what a title's own swap
           * counter counts -- see xbox_Nv2aFrameCounterFlip. */
          xbox_Nv2aFrameCounterFlip();
-@@ -3771,6 +6280,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3771,6 +6314,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              uint32_t pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch
                                                  : s_gpu.pitch;
              if (done) {
@@ -10473,7 +10606,7 @@ index 1280565..6589cc0 100644
                  xbox_FramebufferWindowSet(dma_resolve(done), pitch);
                  xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
                  xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
-@@ -3800,6 +6311,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3800,6 +6345,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          s_gpu.drawn_stale = 1;
          if (s_backend && s_backend->flip)
              s_backend->flip();
@@ -10483,7 +10616,7 @@ index 1280565..6589cc0 100644
  
          if (verbose) {
              static unsigned n;
-@@ -3876,6 +6390,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3876,6 +6424,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * them -- so they are constants that happen to arrive by method.
           * Dropped, every vertex program put its whole batch at the origin:
           * no 3D anywhere, and a black car on the garage screen. */
@@ -10538,7 +10671,7 @@ index 1280565..6589cc0 100644
          if (method >= 0x0A20 && method < 0x0A30) {
              nv2a_vsh_constant_component(59, (method - 0x0A20) / 4, param);
              break;
-@@ -4098,6 +6660,7 @@ void nv2a_pb_exec_report(void)
+@@ -4098,6 +6694,7 @@ void nv2a_pb_exec_report(void)
          last_flips = s_gpu.flips;
          last_ms = now;
      }
@@ -12144,7 +12277,7 @@ index 4e86a08..8b2fee2 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..2c99242 100644
+index b26edfe..9d6170b 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -7,20 +7,84 @@
@@ -12249,7 +12382,7 @@ index b26edfe..2c99242 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -51,6 +121,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -51,6 +121,54 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -12261,6 +12394,7 @@ index b26edfe..2c99242 100644
 +static void *volatile s_gpu_handle;
 +static volatile LONG  s_gpu_w, s_gpu_h, s_gpu_gen;
 +static volatile LONG  s_gpu_mark, s_present_gpu;
++static volatile LONG  s_gpu_last_ms;   /* GetTickCount of the last GPU frame */
 +static volatile LONG64 s_gpu_qpc;      /* and its QueryPerformanceCounter, for frame generation */
 +
 +void xbox_FramebufferWindowSetGpuFrame(void *handle, uint32_t width, uint32_t height)
@@ -12276,6 +12410,7 @@ index b26edfe..2c99242 100644
 +    LARGE_INTEGER now;
 +    QueryPerformanceCounter(&now);
 +    InterlockedExchange64(&s_gpu_qpc, now.QuadPart);
++    InterlockedExchange(&s_gpu_last_ms, (LONG)GetTickCount());
 +    InterlockedExchange(&s_gpu_mark, 1);
 +}
 +
@@ -12302,7 +12437,7 @@ index b26edfe..2c99242 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -120,6 +236,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -120,6 +238,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -12310,7 +12445,7 @@ index b26edfe..2c99242 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -145,16 +262,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -145,16 +264,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12656,7 +12791,7 @@ index b26edfe..2c99242 100644
          xbox_InputKeySet((int)w, 1);
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
-@@ -183,6 +629,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -183,6 +631,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -12674,7 +12809,7 @@ index b26edfe..2c99242 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -268,15 +725,2088 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -268,15 +727,2094 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -14575,7 +14710,13 @@ index b26edfe..2c99242 100644
 +
 +    if (!d3d.rtv)
 +        return E_FAIL;
-+    gpu = s_present_gpu && d3d_gpu_frame();
++    /* A flip whose GPU frame the back end had to skip (this thread held the
++     * shared texture) used to fall back to the guest copy: a frame older and
++     * resolved differently, so the picture jumped -- the flicker in speed1,
++     * about one frame in 60. While the back end is presenting, show its
++     * newest frame, repeating the last one if this flip brought none. */
++    gpu = (s_present_gpu || (s_gpu_handle && GetTickCount() - (DWORD)s_gpu_last_ms < 250))
++          && d3d_gpu_frame();
 +    if (!gpu && SUCCEEDED(ID3D11DeviceContext_Map(d3d.ctx, (ID3D11Resource *)d3d.tex, 0,
 +                                          D3D11_MAP_WRITE_DISCARD, 0, &map))) {
 +        for (row = 0; row < s_fb_height; row++)
@@ -14764,7 +14905,7 @@ index b26edfe..2c99242 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +2816,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -286,9 +2824,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -14790,7 +14931,7 @@ index b26edfe..2c99242 100644
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
-@@ -309,36 +2852,101 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -309,36 +2860,101 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
  
@@ -14902,7 +15043,7 @@ index b26edfe..2c99242 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,41 +2957,89 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -349,41 +2965,93 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -15001,14 +15142,18 @@ index b26edfe..2c99242 100644
      free(s_rgb);
      s_rgb = NULL;
 +    if (s_fb_closed) {
++        /* Not exit(): its static destructors free the GPU back end's caches
++         * while the pushbuffer walker is still drawing with them (a read of
++         * a freed texture list in get_texture, glow2). The logs are flushed;
++         * nothing else needs tearing down. */
 +        fprintf(stderr, "  [FBWIN] window closed: exiting\n");
 +        fflush(NULL);
-+        exit(0);
++        TerminateProcess(GetCurrentProcess(), 0);
 +    }
      return 0;
  }
  
-@@ -391,7 +3047,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -391,7 +3059,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -15017,7 +15162,7 @@ index b26edfe..2c99242 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -402,4 +3058,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -402,4 +3070,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
