@@ -205,6 +205,104 @@ static void dr_default_env(void)
 #ifndef DR_VERSION
 #define DR_VERSION "dev"
 #endif
+
+#ifdef DR_RELEASE
+/* Copy a folder's files and subfolders into another, leaving files already
+ * there alone. Small trees only: the game's saves. */
+static void dr_copy_tree(const char *from, const char *to)
+{
+    char pattern[MAX_PATH], src[MAX_PATH], dst[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+
+    CreateDirectoryA(to, NULL);
+    snprintf(pattern, sizeof pattern, "%s\\*", from);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, ".."))
+            continue;
+        snprintf(src, sizeof src, "%s\\%s", from, fd.cFileName);
+        snprintf(dst, sizeof dst, "%s\\%s", to, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            dr_copy_tree(src, dst);
+        else
+            CopyFileA(src, dst, TRUE);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+static int dr_has_files(const char *dir)
+{
+    char pattern[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int any = 0;
+    snprintf(pattern, sizeof pattern, "%s\\*", dir);
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    do
+        any = strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..");
+    while (!any && FindNextFileA(h, &fd));
+    FindClose(h);
+    return any;
+}
+
+/* Saves in the download's own folder, so the folder is portable: the game,
+ * the settings and the saves move together. A "saves" folder beside the exe
+ * holds the title's E:\UDATA and E:\TDATA (RECOMP_SAVE_DIR, which moves just
+ * those); the Xbox's partition images (5 GB, sparse) and caches, which the
+ * game rebuilds on its own, stay in old_dir on this machine. [game] saves in
+ * exonerated.ini names another folder (relative to the exe), and a
+ * RECOMP_SAVE_DIR you set wins. Where the exe's folder can't be written
+ * (Program Files), the saves stay in old_dir as before. Saves an earlier
+ * version left in old_dir are copied over once. */
+static void dr_portable_saves(const char *old_dir)
+{
+    char exe_dir[MAX_PATH], ini[MAX_PATH], want[MAX_PATH], dir[MAX_PATH];
+    char probe[MAX_PATH], from[MAX_PATH], to[MAX_PATH], *slash;
+    static const char *const subs[] = { "UDATA", "TDATA" };
+    HANDLE f;
+    size_t i;
+
+    if (getenv("RECOMP_SAVE_DIR") && *getenv("RECOMP_SAVE_DIR"))
+        return;
+    GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+    if ((slash = strrchr(exe_dir, '\\')) != NULL)
+        *slash = 0;
+    snprintf(ini, sizeof ini, "%s\\exonerated.ini", exe_dir);
+    GetPrivateProfileStringA("game", "saves", "saves", want, sizeof want, ini);
+    if (want[0] == '\\' || (want[0] && want[1] == ':'))
+        snprintf(dir, sizeof dir, "%s", want);
+    else
+        snprintf(dir, sizeof dir, "%s\\%s", exe_dir, want);
+
+    /* Writable? Make it and drop a file in it. */
+    CreateDirectoryA(dir, NULL);
+    snprintf(probe, sizeof probe, "%s\\.write-test", dir);
+    f = CreateFileA(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[BOOT] saves: %s is not writable; keeping them in %s\n",
+                dir, old_dir ? old_dir : "the default folder");
+        return;
+    }
+    CloseHandle(f);
+
+    for (i = 0; old_dir && i < sizeof subs / sizeof subs[0]; i++) {
+        snprintf(from, sizeof from, "%s\\%s", old_dir, subs[i]);
+        snprintf(to, sizeof to, "%s\\%s", dir, subs[i]);
+        if (dr_has_files(from) && !dr_has_files(to)) {
+            dr_copy_tree(from, to);
+            fprintf(stderr, "[BOOT] saves: copied %s to %s\n", from, to);
+        }
+    }
+    _putenv_s("RECOMP_SAVE_DIR", dir);
+    fprintf(stderr, "[BOOT] saves: %s\n", dir);
+}
+#endif
 extern void xbox_LauncherRun(const char *version);
 extern int xbox_FramebufferWindowGpu(void);
 
@@ -630,14 +728,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
         const char *save_dir = NULL;
 #ifdef DR_RELEASE
-        /* A player's saves and the Xbox cache under the game's own name,
-         * not the toolkit's shared %LOCALAPPDATA%\xboxrecomp. */
+        /* The Xbox's partition images and caches under the game's own name,
+         * not the toolkit's shared %LOCALAPPDATA%\xboxrecomp; the saves
+         * themselves beside the exe (dr_portable_saves). */
         static char release_save[MAX_PATH];
         const char *local = getenv("LOCALAPPDATA");
         if (local && *local) {
             snprintf(release_save, sizeof release_save, "%s\\Exonerated", local);
             save_dir = release_save;
         }
+        dr_portable_saves(save_dir);
 #endif
         xbox_path_init(YOUR_GAME_DIR, save_dir);
     }

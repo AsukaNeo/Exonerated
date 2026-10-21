@@ -20,7 +20,7 @@ FIRST START
      into a "game" folder here, movies and all. This happens only once
      (about 1.1 GB).
   You can also drag the .iso onto Exonerated.exe. Everything then lives in
-  this one folder: Exonerated.exe, exonerated.ini and game.
+  this one folder: Exonerated.exe, exonerated.ini, game and saves.
   4. The title card opens: Play, Settings or Exit to Windows. Use the
      arrow keys or d-pad and Enter or A, or the mouse.
 
@@ -43,8 +43,11 @@ IF SOMETHING GOES WRONG
     works, because Exonerated is built from that exact program.
   - Settings live in exonerated.ini next to Exonerated.exe; delete it to go
     back to the defaults.
-  - Saved games are kept in %LOCALAPPDATA%\Exonerated, so they survive
-    unzipping a newer version somewhere else.
+  - Saved games are kept in the "saves" folder here, so this whole folder
+    is portable: copy it to another PC or drive and your game, settings and
+    saves come along. For a new version, unzip it over this folder, or copy
+    "game", "saves" and exonerated.ini into the new one. (The Xbox's own
+    caches stay on each PC in %LOCALAPPDATA%\Exonerated and are rebuilt.)
   - To use a different copy of the game, delete the "game" folder (or the
     [game] lines in exonerated.ini) and start again.
 
