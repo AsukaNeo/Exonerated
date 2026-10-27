@@ -40,5 +40,5 @@
     "Testing on more graphics cards",
     "Linux / Steam Deck build"
   ],
-  "notes": "Plays full matches start to finish. GPU renderer (Direct3D 11) at up to 4x the Xbox resolution, in the game's own 16:9 mode; the game's movies play in the window. Title card with settings, F10 overlay (live render resolution, AF, sharpening, FXAA), controller with rumble, keyboard. The download needs your own North American disc (v3): the first start copies the game from your .iso. Next: flicker and texture glitches, testing on more GPUs."
+  "notes": "Plays full matches start to finish. GPU renderer (Direct3D 11) at up to 4x the Xbox resolution, in the game's own 16:9 mode; the game's movies play in the window. Title card with settings, F10 overlay (live render resolution, AF, sharpening, FXAA), controller with rumble, keyboard. The download needs your own North American disc (v3): the first start copies the game from your game disc image. Next: flicker and texture glitches, testing on more GPUs."
 }
