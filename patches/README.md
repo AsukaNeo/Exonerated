@@ -4,12 +4,12 @@
 [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) toolkit to get Deathrow
 running well: the D3D11 renderer, the window and settings overlay, audio,
 USB pad and rumble, frame pacing and a fair number of kernel fixes.
-`build.bat` checks out the toolkit at v0.14.0 and applies it for you.
+`build.bat` checks out the toolkit at v0.16.0 and applies it for you.
 
 If you work on the toolkit side, the patch comes from a local branch:
 
 ```
-git -C ../xboxrecomp diff v0.14.0 local-v014 -- src CMakeLists.txt NOTICE > xboxrecomp-local.patch
+git -C ../xboxrecomp diff v0.16.0 local-v016 -- src CMakeLists.txt NOTICE > xboxrecomp-local.patch
 ```
 
 ## Old one-off scripts

@@ -4,7 +4,7 @@
 
 | Script | What it's for |
 |---|---|
-| `build.bat [relift]` | The same build a player runs: fetches xboxrecomp v0.14.0, applies our patch, checks the game and compiles. `relift` redoes the lifting step. |
+| `build.bat [relift]` | The same build a player runs: fetches xboxrecomp v0.16.0, applies our patch, checks the game and compiles. `relift` redoes the lifting step. |
 | `play.sh [name]` | Plays the dev build and saves the output to `logs/<name>.log`. |
 | `run.sh name [seconds]` | An unattended run that presses Start and stops after a while. Good for checking it still boots. |
 | `regen.sh [log]` | Relifts the game code. Give it a run's log and it first adds any functions the run tried to call but couldn't find. |

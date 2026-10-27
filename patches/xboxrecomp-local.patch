@@ -15,10 +15,10 @@ index 427f5d8..580732e 100644
  # Provides link-time libraries for statically recompiled Xbox games.
  # Pattern: extract emulator subsystems (xemu) into reusable static libraries.
 diff --git a/NOTICE b/NOTICE
-index f2a4948..756185e 100644
+index a47ab74..9ff32ff 100644
 --- a/NOTICE
 +++ b/NOTICE
-@@ -68,6 +68,24 @@ Derived algorithms — credited, independently implemented
+@@ -76,6 +76,24 @@ Derived algorithms — credited, independently implemented
    label.
  
  
@@ -44,7 +44,7 @@ index f2a4948..756185e 100644
  -----------------------------------
  
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 1f664a3..a95a553 100644
+index 7746ae3..3aac36c 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -25,6 +25,9 @@
@@ -157,26 +157,25 @@ index 1f664a3..a95a553 100644
      if (xbox_ContiguousPageMap()[a >> 12])
          return "win";
      if (a >= g_xbox_image_lo && a < g_xbox_image_hi)
-@@ -235,6 +245,10 @@ extern APU_TLS uint32_t g_fs_base;
-  * while a guest thread sits at raised IRQL, which is when the single-CPU
-  * console could not have taken the interrupt. The routine acknowledges by
-  * writing ISTS, which drops the line through update_irq. */
+@@ -247,6 +257,9 @@ extern APU_TLS uint32_t g_fs_base;
+  * could not have taken the interrupt beside it, the interrupt is posted and
+  * the holder runs it at its next safe point (xbox_IrqPost). The routine
+  * acknowledges by writing ISTS, which drops the line through update_irq. */
 +/* [ap2] */
 +extern volatile long apu_ap2_ntf[3], apu_ap2_last_empty_voice;
 +static volatile long apu_ap2_irq[2];
-+
- static void apu_deliver_irq(MCPXAPUState *d)
- {
-     /* Per thread, like the g_fs_base it guards: a new instance's frame
-@@ -280,6 +294,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
-     xbox_worker_stack_free(slot);
-     qemu_mutex_lock(&d->lock);
  
+ /* Push the routine's arguments on g_esp and call it at the device IRQL.
+  * Returns what it returned, or -1 with nothing connected. */
+@@ -267,6 +280,7 @@ static int apu_call_isr(void)
+     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = kint;
+     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = 0xDEADBEEFu;
+     { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
 +    if (g_eax & 1) apu_ap2_irq[0]++; else apu_ap2_irq[1]++;   /* [ap2] */
      {
          static unsigned n;
          if (n++ < 3) {
-@@ -898,6 +913,11 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+@@ -972,6 +986,11 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
   *
   * A clock that has fallen more than a period behind (after a stall, or the
   * first call) restarts from now instead of rendering the backlog in a burst. */
@@ -188,7 +187,7 @@ index 1f664a3..a95a553 100644
  int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us)
  {
      int64_t ahead_us = 0;
-@@ -943,6 +963,12 @@ int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us)
+@@ -1017,6 +1036,12 @@ int64_t mcpx_apu_pace_step(MCPXAPUState *d, int64_t now_us)
          d->pace_stalled = false;
      }
  
@@ -201,7 +200,7 @@ index 1f664a3..a95a553 100644
      if (d->next_frame_time_us == 0 ||
          now_us - d->next_frame_time_us > EP_FRAME_US)
          d->next_frame_time_us = now_us;
-@@ -1045,12 +1071,26 @@ static void apu_irq_stats_line(void)
+@@ -1119,12 +1144,26 @@ static void apu_irq_stats_line(void)
          fprintf(stderr, "[APU-IRQ] traps %u se_frames %u fe-trapped-frames %u underruns %u\n",
                  apu_irq_stats.traps, apu_irq_stats.se_frames,
                  apu_irq_stats.fe_trapped_frames, xa2_underruns());
@@ -228,7 +227,7 @@ index 1f664a3..a95a553 100644
      qemu_mutex_lock(&d->lock);
  
      while (!qatomic_read(&d->exiting)) {
-@@ -1177,6 +1217,9 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -1251,6 +1290,9 @@ static void *mcpx_apu_frame_thread(void *arg)
      }
  
      qemu_mutex_unlock(&d->lock);
@@ -239,7 +238,7 @@ index 1f664a3..a95a553 100644
  }
  
 diff --git a/src/apu/apu_shim.h b/src/apu/apu_shim.h
-index 5f3f665..b247bc9 100644
+index 3a3996f..115f6fe 100644
 --- a/src/apu/apu_shim.h
 +++ b/src/apu/apu_shim.h
 @@ -117,6 +117,18 @@ static inline uint8_t ldub_phys(void *as, hwaddr addr) {
@@ -262,7 +261,7 @@ index 5f3f665..b247bc9 100644
  static inline void stl_le_phys(void *as, hwaddr addr, uint32_t val) {
      (void)as;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 128d86f..96a9342 100644
+index 3ec56ca..148c44a 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -47,6 +47,10 @@ static const struct {
@@ -276,7 +275,7 @@ index 128d86f..96a9342 100644
  static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                                int status)
  {
-@@ -140,6 +144,7 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+@@ -141,6 +145,7 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
          assert(d->vp.ssl[v].ssl_index <= 1);
          notifier += d->vp.ssl[v].ssl_index;
      }
@@ -284,7 +283,7 @@ index 128d86f..96a9342 100644
      set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
  }
  
-@@ -1139,6 +1144,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1148,6 +1153,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  d->vp.ssl[v].ssl_index = 0;
                  voice_off(d, (uint16_t)v);
              } else {
@@ -292,7 +291,7 @@ index 128d86f..96a9342 100644
                  set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE +
                                    d->vp.ssl[v].ssl_index,
                                    NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
-@@ -1191,7 +1197,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1211,7 +1217,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  uint32_t linear_addr = block_index * (uint32_t)block_size;
                  if (stream) {
                      hwaddr addr = segment_offset + linear_addr;
@@ -301,7 +300,7 @@ index 128d86f..96a9342 100644
                             block_size);
                  } else {
                      linear_addr += ba;
-@@ -1200,7 +1206,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1220,7 +1226,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                          hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
                                                     0xFFFFFFFF, linear_addr);
                          adpcm_block[word_index] =
@@ -310,7 +309,7 @@ index 128d86f..96a9342 100644
                          linear_addr += 4;
                      }
                  }
-@@ -1230,19 +1236,19 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1250,19 +1256,19 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  float fval;
                  switch (sample_size) {
                  case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
@@ -334,7 +333,7 @@ index 128d86f..96a9342 100644
                      fval = int32_to_float(ival);
                      break;
                  default:
-@@ -1276,6 +1282,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1296,6 +1302,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  int next_index = (ssl_index + 1) % 2;
                  d->vp.ssl[v].ssl_index = next_index;
                  d->vp.ssl[v].ssl_seg = 0;
@@ -342,7 +341,7 @@ index 128d86f..96a9342 100644
                  set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE + ssl_index,
                                    NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
              }
-@@ -1629,6 +1636,9 @@ static void vp_trace_positions(MCPXAPUState *d)
+@@ -1665,6 +1672,9 @@ static void vp_trace_positions(MCPXAPUState *d)
      }
  }
  
@@ -352,7 +351,7 @@ index 128d86f..96a9342 100644
  void mcpx_apu_vp_frame(MCPXAPUState *d,
                          float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
  {
-@@ -1641,6 +1651,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1677,6 +1687,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
          next = voice_list_regs[list].next;
  
          d->regs[current] = d->regs[top];
@@ -360,7 +359,7 @@ index 128d86f..96a9342 100644
  
          for (int i = 0; d->regs[current] != 0xFFFF; i++) {
              if (i >= MCPX_HW_MAX_VOICES) {
-@@ -1649,6 +1660,20 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1685,6 +1696,20 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              }
  
              uint16_t v = (uint16_t)d->regs[current];
@@ -1199,10 +1198,10 @@ index 4779275..52c25ce 100644
  }
  #endif
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
-index c643f72..7ed32a4 100644
+index db45d05..b0b00d2 100644
 --- a/src/kernel/CMakeLists.txt
 +++ b/src/kernel/CMakeLists.txt
-@@ -42,6 +42,10 @@ target_include_directories(xbox_kernel PUBLIC
+@@ -44,6 +44,10 @@ target_include_directories(xbox_kernel PUBLIC
  )
  
  if(WIN32)
@@ -1214,11 +1213,11 @@ index c643f72..7ed32a4 100644
      # include path that "platform/xbox_winnt.h" resolves against.
      target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt)
 diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
-index 564c0bf..095786d 100644
+index 4a6389d..54b3837 100644
 --- a/src/kernel/kernel.h
 +++ b/src/kernel/kernel.h
-@@ -1127,6 +1127,28 @@ void xbox_log(int level, const char* subsystem, const char* fmt, ...);
-  * parity that the field pin (port 0x80C0) reports. */
+@@ -1272,6 +1272,28 @@ void xbox_log(int level, const char* subsystem, const char* fmt, ...);
+  * (port 0x80C0) reports. */
  uint32_t xbox_VblankCount(void);
  
 +/* [si1] The GPU's software-method interrupt, for a NO_OPERATION with data:
@@ -1243,14 +1242,14 @@ index 564c0bf..095786d 100644
 + * that runs title code, before it does. */
 +void xbox_ArmKickTrap(void);
 +
- #ifdef __cplusplus
- }
- #endif
+ /* cpuid for lifted code (kernel_hal.c): the Xbox's Pentium III. Also declared
+  * in templates/runtime/recomp_types.h for generated code. */
+ void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 965dd08..d9f5cc3 100644
+index 10d00f4..80f8f6d 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -267,6 +267,38 @@ static void kernel_data_init(void)
+@@ -268,6 +268,38 @@ static void kernel_data_init(void)
          }
      }
  
@@ -1289,37 +1288,15 @@ index 965dd08..d9f5cc3 100644
      /* Object-type exports. Each gets a DISTINCT non-zero value rather than 0.
       *
       * They were all zero, which is wrong twice over: a title that null-checks
-@@ -687,6 +719,8 @@ static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
- 
- void guest_cpu_join(void);
- void guest_cpu_part(void);
-+int guest_cpu_inline_begin(void);
-+void guest_cpu_inline_end(int saved);
- 
- static DWORD WINAPI bridge_thread_main(LPVOID param)
- {
-@@ -722,6 +756,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
-     }
-     free(s);
- 
+@@ -750,6 +782,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
+      * neither. */
+     xbox_DpcMarkGuestThread();
+     xbox_GuestThreadPin("guest-worker");
 +    xbox_ArmKickTrap();                                      /* [si1] */
      guest_cpu_join();
      bridge_run_thread_inline(fn, ctx1, ctx2);
      guest_cpu_part();
-@@ -858,7 +893,11 @@ static void bridge_PsCreateSystemThreadEx(void)
-                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context2;
-                 g_esp -= 4; BRIDGE_MEM32(g_esp) = start_context1;
-                 g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
--                fn();
-+                {
-+                    int depth = guest_cpu_inline_begin();
-+                    fn();
-+                    guest_cpu_inline_end(depth);
-+                }
-                 g_esp += 12;
-                 fprintf(stderr, "  [KERNEL] PsCreateSystemThreadEx: main thread returned (g_eax=0x%08X)\n", g_eax);
-                 fflush(stderr);
-@@ -1807,6 +1846,53 @@ static void bridge_HalReturnToFirmware(void)
+@@ -1846,6 +1879,53 @@ static void bridge_HalReturnToFirmware(void)
                      waited);
      }
  
@@ -1373,7 +1350,7 @@ index 965dd08..d9f5cc3 100644
      xbox_HalReturnToFirmware(routine);
  }
  
-@@ -1963,7 +2049,128 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
+@@ -2002,7 +2082,128 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
      return h;
  }
  
@@ -1503,7 +1480,7 @@ index 965dd08..d9f5cc3 100644
  static void bridge_KeSetEvent(void)
  {
      uint32_t guest_va = STACK_ARG(0);
-@@ -1985,6 +2192,16 @@ static void bridge_KeSetEvent(void)
+@@ -2024,6 +2225,16 @@ static void bridge_KeSetEvent(void)
          }
      }
      h = ke_shadow_lookup(guest_va);
@@ -1520,7 +1497,7 @@ index 965dd08..d9f5cc3 100644
      if (!h)
          h = bridge_resolve_handle(guest_va);
      if (!h)
-@@ -1996,6 +2213,24 @@ static void bridge_KeSetEvent(void)
+@@ -2035,6 +2246,24 @@ static void bridge_KeSetEvent(void)
  }
  
  /* ── KeWaitForSingleObject (ordinal 159) ─────────────────── */
@@ -1545,7 +1522,7 @@ index 965dd08..d9f5cc3 100644
  static void bridge_KeWaitForSingleObject(void)
  {
      uint32_t object = STACK_ARG(0);
-@@ -2016,11 +2251,19 @@ static void bridge_KeWaitForSingleObject(void)
+@@ -2055,11 +2284,19 @@ static void bridge_KeWaitForSingleObject(void)
                  (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
              if (g_eax == 0 && type == 1)               /* synchronization: consumed */
                  BRIDGE_MEM32(object + 4) = 0;
@@ -1565,7 +1542,7 @@ index 965dd08..d9f5cc3 100644
      if (!h)
          h = bridge_resolve_handle(object);
      if (!h)
-@@ -2029,6 +2272,7 @@ static void bridge_KeWaitForSingleObject(void)
+@@ -2068,6 +2305,7 @@ static void bridge_KeWaitForSingleObject(void)
      g_eax = (uint32_t)xbox_KeWaitForSingleObject(
          h, wait_reason, wait_mode,
          (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
@@ -1573,7 +1550,7 @@ index 965dd08..d9f5cc3 100644
  }
  
  /* ── NtWaitForSingleObject (ordinal 233) ─────────────────── */
-@@ -2348,6 +2592,8 @@ static void bridge_AvSetDisplayMode(void)
+@@ -2427,6 +2665,8 @@ static void bridge_AvSetDisplayMode(void)
           * correctly a few megabytes away. */
          if (fb_va && fb_va < XBOX_CONTIG_SIZE)
              fb_va = XBOX_CONTIG_BASE + fb_va;
@@ -1582,31 +1559,31 @@ index 965dd08..d9f5cc3 100644
  
          xbox_FramebufferWindowSet(fb_va, pitch);
          xbox_FramebufferWindowStart();
-@@ -2478,7 +2724,20 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
-     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
-     g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
-     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
--    { int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql); }
-+    {                                                   /* [dp1] */
-+        ULONGLONG _t0 = GetTickCount64();
-+        int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql);
-+        {
-+            ULONGLONG _dt = GetTickCount64() - _t0;
-+            static volatile LONG _n;
-+            if (_dt > 20 && InterlockedIncrement(&_n) <= 40) {
-+                fprintf(stderr, "  [DPCSLOW] routine %08X (dpc %08X) took %llu ms, tid %lu\n",
-+                        routine, dpc_va, (unsigned long long)_dt,
-+                        (unsigned long)GetCurrentThreadId());
-+                fflush(stderr);
+@@ -2560,7 +2800,20 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+         g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
+         g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
+         g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
+-        { int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql); }
++        {                                               /* [dp1] */
++            ULONGLONG _t0 = GetTickCount64();
++            int _irql = xbox_IrqlEnterInterrupt(2); fn(); xbox_IrqlLeaveInterrupt(_irql);
++            {
++                ULONGLONG _dt = GetTickCount64() - _t0;
++                static volatile LONG _n;
++                if (_dt > 20 && InterlockedIncrement(&_n) <= 40) {
++                    fprintf(stderr, "  [DPCSLOW] routine %08X (dpc %08X) took %llu ms, tid %lu\n",
++                            routine, dpc_va, (unsigned long long)_dt,
++                            (unsigned long)GetCurrentThreadId());
++                    fflush(stderr);
++                }
 +            }
 +        }
-+    }
+         callback_regs_restore(&saved, 0);
+     }
      return 1;
- }
- 
-@@ -2498,6 +2757,9 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
-  * ever contend, this wants the interrupt object's own lock rather than a
-  * global one.
+@@ -2580,6 +2833,9 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+  * The lock is the one-CPU gate the device models deliver ISRs under (one
+  * for all interrupts, not the interrupt object's own).
   */
 +int xbox_GdlockEnabled(void);      /* gd1 */
 +int xbox_IrqlRaiseSync(void);
@@ -1614,19 +1591,19 @@ index 965dd08..d9f5cc3 100644
  static void bridge_KeSynchronizeExecution(void)
  {
      uint32_t routine = STACK_ARG(1);
-@@ -2518,7 +2780,10 @@ static void bridge_KeSynchronizeExecution(void)
-      * the dummy return address and the argument, so g_esp needs no fixup. */
-     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
-     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
--    fn();
-+    if (xbox_GdlockEnabled()) {         /* gd1 */
-+        int _s = xbox_IrqlRaiseSync(); fn(); xbox_IrqlLowerSync(_s);
-+    } else
-+        fn();
-     /* g_eax is whatever the routine returned, which is this call's result. */
- }
- 
-@@ -2684,51 +2949,103 @@ static int kernel_raise_interrupt(uint32_t vector)
+@@ -2614,7 +2870,10 @@ static void bridge_KeSynchronizeExecution(void)
+     xbox_DispatchGateEnter();
+     {
+         int took = xbox_GuestCpuEnterCallback();
+-        fn();
++        if (xbox_GdlockEnabled()) {     /* gd1 */
++            int _s = xbox_IrqlRaiseSync(); fn(); xbox_IrqlLowerSync(_s);
++        } else
++            fn();
+         xbox_GuestCpuLeaveCallback(took);
+     }
+     xbox_DispatchGateLeave();
+@@ -2794,19 +3053,34 @@ static int kernel_call_isr(uint32_t vector)
   * bit 24 to say the PCRTC block is the source. Without those the handler looks,
   * finds nothing, and correctly declines.
   *
@@ -1656,38 +1633,62 @@ index 965dd08..d9f5cc3 100644
 +#define NV2A_PGRAPH_TRAPPED_DATA 0x00400708u
 +#define NV2A_PGRAPH_INCREMENT  0x0040071Cu
 +#define NV2A_PGRAPH_INCREMENT_READ_3D (1u << 1)
+ #define NV2A_PMC_INTR_EN_0     0x00000140u
  #define NV2A_PCRTC_INTR_0      0x00600100u
  #define NV2A_PCRTC_INTR_VBLANK (1u << 0)
+ #define NV2A_PCRTC_INTR_EN_0   0x00600140u
  #define NV2A_VECTOR            3u
 +#define NV2A_REG(off)          BRIDGE_MEM32(XBOX_NV2A_REG_BASE + (off))
  
+ /* Milliseconds on the performance counter, for the vblank schedule, the
+  * kernel timers and the vblank ack wait. GetTickCount64 is not good enough
+@@ -3043,6 +3317,7 @@ static int kernel_vblank_mode(void)
+ /* The one vblank count. The tick increments it directly, the 60 Hz
+  * schedule through kernel_vblank_count; only one of the two ever runs. */
  static volatile LONG g_vblank_total;
 +static HANDLE g_nv2a_gpu_event;         /* [si1] set on every vblank and flip */
  
  uint32_t xbox_VblankCount(void)
  {
-     return (uint32_t)g_vblank_total;
+@@ -3259,40 +3534,70 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
+     return 1;
  }
  
+-/* RECOMP_VBLANK without the 60 Hz schedule: v0.14.0's tick, unchanged. On
+- * the timer thread's plain 10 ms loop, so about every 20 ms. */
 -static void kernel_vblank_tick(void)
++/* RECOMP_VBLANK without the 60 Hz schedule (and without the one-CPU gate
++ * or upstream's flip hold): our [si1] path -- a 60 Hz vblank on the
++ * performance counter and D3D's swap interrupts, delivered on the timer
++ * thread (kernel_vblank_tick, kernel_timer_wait below). It takes the place
++ * of v0.16.0's tick mode. */
 +static int vblank_enabled(void)
  {
-     static int enabled = -1;
--    static long long next_ms;
+-    static long long next_ms, last_ms;
 -    long long now;
--
-     if (enabled < 0)
-         enabled = getenv("RECOMP_VBLANK") != NULL;
--    if (!enabled)
--        return;
-+    return enabled;
++    return kernel_vblank_mode() == XBOX_VBLANK_TICK;
 +}
-+
+ 
+-    if (kernel_vblank_mode() != XBOX_VBLANK_TICK)
+-        return;
 +/* The vblank schedule: t0 + n periods. A thread that falls behind by more
 + * than a few vblanks restarts the schedule rather than delivering a burst. */
 +static LARGE_INTEGER s_vbl_freq;
 +static LONGLONG s_vbl_next, s_vbl_period;
-+
+ 
+-    now = (long long)GetTickCount64();
+-    if (now < next_ms)
+-        return;
+-    next_ms = now + 16;                       /* ~60 Hz */
+-    /* The rate it really runs at (the 10 ms Sleep makes it nearer 50 Hz),
+-     * in the same words as the 60 Hz schedule's line. Only a log line. */
+-    if (!last_ms)
+-        last_ms = now;              /* so the first line spans 599 vblanks */
+-    if (InterlockedIncrement(&g_vblank_total) % 600 == 0) {
+-        fprintf(stderr, "  [NV2A] vblank %ld (tick): last 600 in %lld ms\n",
+-                (long)g_vblank_total, now - last_ms);
+-        fflush(stderr);
+-        last_ms = now;
 +static LONGLONG vblank_due_in(void)     /* counter ticks until the next vblank */
 +{
 +    LARGE_INTEGER now;
@@ -1696,41 +1697,38 @@ index 965dd08..d9f5cc3 100644
 +        QueryPerformanceFrequency(&s_vbl_freq);
 +        s_vbl_period = s_vbl_freq.QuadPart / 60;
 +        s_vbl_next = now.QuadPart + s_vbl_period;
-+    }
+     }
 +    return s_vbl_next - now.QuadPart;
 +}
-+
+ 
+-    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
 +/* [si1] Write-1-to-clear interrupt status, emulated while the timer thread
 + * delivers an interrupt. Set in kernel_irq_traps_arm and nv2a_irq_veh below. */
 +static volatile int s_irq_w1c;           /* the traps are armed and a delivery is on */
 +static volatile uint32_t s_pgraph_pending, s_pcrtc_pending;
 +static void nv2a_intr_publish(void);
- 
--    now = (long long)GetTickCount64();
--    if (now < next_ms)
++
 +static void kernel_vblank_tick(void)
 +{
 +    if (!vblank_enabled())
-         return;
--    next_ms = now + 16;                       /* ~60 Hz */
-+    if (vblank_due_in() > 0)
 +        return;
++    if (vblank_due_in() > 0)
+         return;
 +    s_vbl_next += s_vbl_period;
 +    if (vblank_due_in() < -4 * s_vbl_period)
 +        s_vbl_next += ((-vblank_due_in()) / s_vbl_period + 1) * s_vbl_period;
-     InterlockedIncrement(&g_vblank_total);
++    InterlockedIncrement(&g_vblank_total);
 +    InterlockedIncrement(&ke3_vbn);                          /* [ke3] */
 +    if (g_nv2a_gpu_event)
 +        SetEvent(g_nv2a_gpu_event);
  
--    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
-+    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
-+        InterlockedIncrement(&ke3_vb[2]);
-         return;
-+    }
- 
 -    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PCRTC_INTR_0) |= NV2A_PCRTC_INTR_VBLANK;
 -    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)   |= NV2A_PMC_INTR_PCRTC;
++    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
++        InterlockedIncrement(&ke3_vb[2]);
++        return;
++    }
++
 +    if (s_irq_w1c) {
 +        s_pcrtc_pending |= NV2A_PCRTC_INTR_VBLANK;
 +        nv2a_intr_publish();
@@ -1741,12 +1739,12 @@ index 965dd08..d9f5cc3 100644
  
      {
          static unsigned n;
-         int claimed = kernel_raise_interrupt(NV2A_VECTOR);
+         int claimed = kernel_call_isr(NV2A_VECTOR);
 +        InterlockedIncrement(&ke3_vb[claimed < 0 ? 3 : claimed ? 0 : 1]);   /* [ke3] */
          if (n++ < 3)
              fprintf(stderr, "  [NV2A] vblank -> ISR %s\n",
                      claimed < 0 ? "not callable" :
-@@ -2760,6 +3077,364 @@ static void kernel_drain_dpcs(void)
+@@ -3348,6 +3653,367 @@ static int kernel_drain_dpcs(int *ran)
      }
  }
  
@@ -2033,8 +2031,11 @@ index 965dd08..d9f5cc3 100644
 +    NV2A_REG(NV2A_PGRAPH_NSOURCE) = NV2A_PGRAPH_NSOURCE_NOTIFICATION;
 +    s_pgraph_pending |= NV2A_PGRAPH_INTR_ERROR;
 +    nv2a_intr_publish();
-+    claimed = kernel_raise_interrupt(NV2A_VECTOR);
-+    kernel_drain_dpcs();
++    claimed = kernel_call_isr(NV2A_VECTOR);
++    {
++        int ran;
++        kernel_drain_dpcs(&ran);
++    }
 +    if (s_pgraph_pending) {                   /* not acknowledged: let it go */
 +        static unsigned n;
 +        if (n++ < 3)
@@ -2108,10 +2109,10 @@ index 965dd08..d9f5cc3 100644
 +}
 +/* ---- end [si1] ----------------------------------------------------------- */
 +
- /* ── KeInitializeDpc (ordinal 107) ────────────────────────
-  * VOID KeInitializeDpc(PKDPC Dpc, PKDEFERRED_ROUTINE DeferredRoutine,
-  *                       PVOID DeferredContext)
-@@ -2767,6 +3442,112 @@ static void kernel_drain_dpcs(void)
+ /* The timer thread's drain, for tests/irq_progress: the timer thread itself
+  * cannot start without a title's TLS image for its TIB. */
+ int xbox_DpcDrainTimer(int *ran)
+@@ -3379,6 +4045,112 @@ int xbox_DpcDrainHere(void)
   * Initializes a DPC object. The Xbox KDPC structure is 32 bytes.
   * We zero it and set the routine and context pointers.
   */
@@ -2224,7 +2225,7 @@ index 965dd08..d9f5cc3 100644
  static void bridge_KeInitializeDpc(void)
  {
      uint32_t dpc_va = STACK_ARG(0);
-@@ -2789,6 +3570,7 @@ static void bridge_KeInitializeDpc(void)
+@@ -3401,6 +4173,7 @@ static void bridge_KeInitializeDpc(void)
      BRIDGE_MEM16(dpc_va + 0) = 0x13;   /* Type */
      BRIDGE_MEM32(dpc_va + 12) = routine; /* DeferredRoutine */
      BRIDGE_MEM32(dpc_va + 16) = context; /* DeferredContext */
@@ -2232,27 +2233,30 @@ index 965dd08..d9f5cc3 100644
      g_eax = 0;
  }
  
-@@ -3018,14 +3800,18 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3763,6 +4536,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          }
          g_fs_base = tib;
      }
 +    kernel_irq_traps_arm();                                  /* [si1] */
  
-     for (;;) {
-         long long now;
-         int i;
+     if (!kernel_timer_paced()) {
+         /* Neither the 60 Hz vblank nor the gate: the 10 ms tick, the
+@@ -3772,9 +4546,12 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+             long long timer_due;
+             int ran;
  
--        Sleep(10);
-+        kernel_timer_wait();   /* the next vblank, a posted GPU method, or 10 ms */
-+        nv2a_irq_begin();
-         kernel_vblank_tick();  /* the GPU's frame clock */
-         kernel_drain_dpcs();   /* deferred work, before due timers */
-+        nv2a_service_software_method();
-+        nv2a_irq_end();
-         now = (long long)GetTickCount64();
- 
-         for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3360,6 +4146,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
+-            Sleep(10);
++            kernel_timer_wait();   /* [si1] the next vblank, a posted GPU method, or 10 ms */
++            nv2a_irq_begin();
+             kernel_vblank_tick();  /* the GPU's frame clock */
+-            kernel_drain_dpcs(&ran);
++            kernel_drain_dpcs(&ran);   /* deferred work, before due timers */
++            nv2a_service_software_method();
++            nv2a_irq_end();
+             kernel_fire_timers(kernel_timer_clock_ms(), &timer_due);
+         }
+     }
+@@ -4097,6 +4874,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
      return (HANDLE)(uintptr_t)token;
  }
  
@@ -2262,7 +2266,7 @@ index 965dd08..d9f5cc3 100644
  static HANDLE bridge_take_handle(uint32_t token)
  {
      if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-@@ -4221,25 +5010,84 @@ static void bridge_NtQueryDirectoryFile(void)
+@@ -5007,25 +5787,84 @@ static void bridge_NtQueryDirectoryFile(void)
      bridge_write_iostatus(ios_va, ios.Status, (uint32_t)ios.Information);
  }
  
@@ -2351,7 +2355,7 @@ index 965dd08..d9f5cc3 100644
      if (retlen_va) BRIDGE_MEM32(retlen_va) = (uint32_t)len;
  
      /* Say so when the buffer could not be filled.
-@@ -7660,6 +8508,8 @@ static void bridge_KePulseEvent(void)
+@@ -8446,6 +9285,8 @@ static void bridge_KePulseEvent(void)
          }
      }
      h = ke_shadow_lookup(guest_va);
@@ -2360,7 +2364,7 @@ index 965dd08..d9f5cc3 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -7728,6 +8578,14 @@ static void bridge_KeResetEvent(void)
+@@ -8514,6 +9355,14 @@ static void bridge_KeResetEvent(void)
          }
      }
      h = ke_shadow_lookup(guest_va);
@@ -2375,7 +2379,7 @@ index 965dd08..d9f5cc3 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -7960,6 +8818,16 @@ static void bridge_KeSetEventBoostPriority(void)
+@@ -8746,6 +9595,16 @@ static void bridge_KeSetEventBoostPriority(void)
      (void)increment;
  
      h = ke_shadow_lookup(guest_va);
@@ -2392,39 +2396,7 @@ index 965dd08..d9f5cc3 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -10019,6 +10887,31 @@ void guest_cpu_part(void)
-     t_guest_thread = 0;
- }
- 
-+/* A guest thread run inline from inside a kernel call: the title's main
-+ * thread, which PsCreateSystemThreadEx runs on the calling thread. The call
-+ * let go of the guest CPU on the way in and counts one level of dispatch, so
-+ * without this the thread runs to the end with no lock at all: every later
-+ * kernel call returns at depth 1 and never takes it again. Aggressive Inline
-+ * (2026-10-23): its loading-screen thread drew on while the main thread spun
-+ * in D3D's BlockOnFence, so the fence ran past the snapshot and the wait never
-+ * ended. Run it at depth 0 holding the CPU, as a thread of its own would. */
-+int guest_cpu_inline_begin(void)
-+{
-+    int saved = t_dispatch_depth;
-+    t_dispatch_depth = 0;
-+    guest_cpu_join();
-+    return saved;
-+}
-+
-+void guest_cpu_inline_end(int saved)
-+{
-+    if (t_guest_held) {
-+        t_guest_held = 0;
-+        LeaveCriticalSection(&g_guest_cpu);
-+    }
-+    t_dispatch_depth = saved;
-+}
-+
- /* A guest thread lets go of the guest CPU for the length of every kernel
-  * call. */
- static void kernel_thunk_dispatch(void)
-@@ -10284,6 +11177,151 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count)
+@@ -11050,6 +11909,151 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count)
      g_ordinal_remap_count = count;
  }
  
@@ -2576,16 +2548,16 @@ index 965dd08..d9f5cc3 100644
  void xbox_kernel_bridge_init(void)
  {
      int i;
-@@ -10293,6 +11331,8 @@ void xbox_kernel_bridge_init(void)
-     DWORD old_protect;
- 
-     guest_cpu_join();          /* the caller goes on to run the title's entry point */
+@@ -11063,6 +12067,8 @@ void xbox_kernel_bridge_init(void)
+      * other thread. */
+     xbox_DpcMarkGuestThread();
+     guest_cpu_join();
 +    xbox_ArmKickTrap();                                      /* [si1] */
 +    sp1_start();               /* [sp1] */
      fprintf(stderr, "  Kernel thunk bridge: resolving %d entries at 0x%08X\n",
              g_thunk_table_count, g_thunk_table_base);
  
-@@ -10424,3 +11464,17 @@ void xbox_kernel_bridge_init(void)
+@@ -11194,3 +12200,17 @@ void xbox_kernel_bridge_init(void)
              KERNEL_VA_BASE, KERNEL_VA_BASE + (resolved - 1) * 4);
  
  }
@@ -2604,10 +2576,10 @@ index 965dd08..d9f5cc3 100644
 +    fprintf(stderr, "\n"); fflush(stderr);
 +}
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
-index 3a09ca8..654b167 100644
+index 45d548c..0c41b1b 100644
 --- a/src/kernel/kernel_hal.c
 +++ b/src/kernel/kernel_hal.c
-@@ -55,8 +55,227 @@ extern RECOMP_TLS uint32_t g_fs_base;
+@@ -57,6 +57,224 @@ extern RECOMP_TLS uint32_t g_fs_base;
   * guest memory on its behalf uses the same one. */
  extern ptrdiff_t g_xbox_mem_offset;
  
@@ -2829,13 +2801,18 @@ index 3a09ca8..654b167 100644
 +}
 +/* ---- end gd1 ------------------------------------------------------------ */
 +
+ /* Set by the lower that gave the one-CPU gate back (irql_track_gated): the
+  * release point runs once the new level is written, below. */
+ static XBOX_THREAD_LOCAL int t_release_due;
+@@ -64,6 +282,7 @@ static void irql_release_due(void);
+ 
  static void irql_publish(void)
  {
 +    gd_sync(g_current_irql);
      if (g_fs_base)
          *(volatile uint8_t *)((uintptr_t)g_xbox_mem_offset + g_fs_base
                                + 0x24) = (uint8_t)g_current_irql;
-@@ -82,6 +301,7 @@ static volatile LONG g_irql_raised_count = 0;
+@@ -91,6 +310,7 @@ static volatile LONG g_irql_raised_count = 0;
   * so a deferred interrupt is delivered on the next poll rather than lost. */
  int xbox_IrqlBlocksInterrupts(void)
  {
@@ -2843,14 +2820,16 @@ index 3a09ca8..654b167 100644
      return InterlockedCompareExchange(&g_irql_raised_count, 0, 0) != 0;
  }
  
-@@ -213,15 +433,45 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
+@@ -911,6 +1131,8 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
  int xbox_IrqlEnterInterrupt(int level)
  {
      int saved = (int)g_current_irql;
 +    int gd_isr = level > DISPATCH_LEVEL;      /* gd1 */
 +    if (gd_isr) t_gd_isr++; else t_gd_dpc++;
      if (g_current_irql != (KIRQL)level) {
-         irql_track(g_current_irql, (KIRQL)level, IRQL_CALLER());
+         /* A DPC (DISPATCH_LEVEL) goes through the gate; a device ISR does
+          * not (see s_dispatch_gate). */
+@@ -919,10 +1141,38 @@ int xbox_IrqlEnterInterrupt(int level)
          g_current_irql = (KIRQL)level;
          irql_publish();
      }
@@ -2890,7 +2869,7 @@ index 3a09ca8..654b167 100644
  {
      if (g_current_irql != (KIRQL)saved) {
          irql_track(g_current_irql, (KIRQL)saved, IRQL_CALLER());
-@@ -1035,12 +1285,16 @@ ULONGLONG __stdcall xbox_KeQueryInterruptTime(void)
+@@ -1774,12 +2024,16 @@ ULONGLONG __stdcall xbox_KeQueryInterruptTime(void)
   * ========================================================================= */
  #define XBOX_TSC_HZ 733333333ull
  
@@ -2950,7 +2929,7 @@ index e66e3de..c58f2b7 100644
  
  VOID __stdcall xbox_MmPersistContiguousMemory(PVOID BaseAddress, ULONG NumberOfBytes, BOOLEAN Persist)
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
-index 37c3621..69b424e 100644
+index 2f1edbb..40c6228 100644
 --- a/src/kernel/kernel_path.c
 +++ b/src/kernel/kernel_path.c
 @@ -1,3 +1,4 @@
@@ -2958,7 +2937,7 @@ index 37c3621..69b424e 100644
  /*
   * kernel_path.c - Xbox device-path translation
   *
-@@ -596,6 +597,8 @@ translate:
+@@ -621,6 +622,8 @@ translate:
      if (g_xbox_path_hook)
          g_xbox_path_hook(xbox_path);
      fprintf(stderr, "  [PATH] %s\n", xbox_path);
@@ -2968,19 +2947,19 @@ index 37c3621..69b424e 100644
      {
          WCHAR remainder_wide[MAX_PATH];
 diff --git a/src/kernel/kernel_xbox.c b/src/kernel/kernel_xbox.c
-index 4ebdfb9..0768aca 100644
+index c23a3fe..ed07f67 100644
 --- a/src/kernel/kernel_xbox.c
 +++ b/src/kernel/kernel_xbox.c
-@@ -125,6 +125,8 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
-  *   - DVD Region: Region 1 (North America)
+@@ -127,6 +127,8 @@ NTSTATUS __stdcall xbox_XeUnloadSection(PXBE_SECTION_HEADER Section)
+  *   - Time zone: the host's
   * ============================================================================ */
  
 +int xbox_FramebufferWindowWidescreen(void);   /* src/video/fb_present.c */
 +
- NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
-     ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength)
- {
-@@ -145,9 +147,18 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
+ /* The console's time zone. The EEPROM holds the bias (UTC = local + bias,
+  * in minutes), the standard and daylight biases added to it, four-character
+  * names, and the dates daylight time starts and ends (month, week of the
+@@ -220,9 +222,18 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
          break;
  
      case XC_VIDEO:
@@ -7708,10 +7687,10 @@ index 0000000..e27083f
 +#endif
 \ No newline at end of file
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 1280565..68f738e 100644
+index a513bc7..6fdda9e 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -39,6 +39,9 @@
+@@ -41,6 +41,9 @@
  #include "nv2a_combiner.h"
  #include "nv2a_backend.h"
  #if defined(_WIN32)
@@ -7721,7 +7700,7 @@ index 1280565..68f738e 100644
  #include <windows.h>
  #define NV_TLS __declspec(thread)
  #else
-@@ -50,6 +53,7 @@ extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
+@@ -52,6 +55,7 @@ extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
  extern void xbox_FramebufferWindowSetAA(uint32_t sy);
  extern uint32_t xbox_Nv2aFenceWordVa(void);
  extern int nv2a_pb_dma_walk(void);   /* nv2a_pb_scan.c: RECOMP_PB_WALK=dma */
@@ -7729,7 +7708,7 @@ index 1280565..68f738e 100644
  extern void xbox_FramebufferWindowStart(void);
  extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
  
-@@ -115,6 +119,12 @@ static uint32_t dma_resolve(uint32_t offset)
+@@ -117,6 +121,12 @@ static uint32_t dma_resolve(uint32_t offset)
  {
      extern uint32_t xbox_ContiguousAllocatedBytes(void);
  
@@ -7742,7 +7721,7 @@ index 1280565..68f738e 100644
      /* Did this runtime hand the offset out as contiguous memory? Then the
       * bytes live in the window, and that is not a guess: the arena is a bump
       * allocator from XBOX_CONTIG_BASE, so everything below its high-water
-@@ -355,6 +365,8 @@ static struct {
+@@ -368,6 +378,8 @@ static struct {
   * material colours, cull and clip state handed to a back end) is read from
   * here. */
  static uint32_t s_reg[0x2000 / 4];
@@ -7751,7 +7730,7 @@ index 1280565..68f738e 100644
  static float reg_f(uint32_t method)
  {
      float f;
-@@ -437,6 +449,47 @@ static void note_texture_use(void)
+@@ -450,6 +462,47 @@ static void note_texture_use(void)
  
      if (!s_gpu.texs[0].valid)
          return;
@@ -7799,7 +7778,7 @@ index 1280565..68f738e 100644
      for (i = 0; i < s_tex_use_count; i++) {
          if (s_tex_use[i].offset == s_gpu.texs[0].offset
           && s_tex_use[i].color  == s_gpu.texs[0].color) {
-@@ -752,6 +805,14 @@ static void surface_apply_clip(void)
+@@ -765,6 +818,14 @@ static void surface_apply_clip(void)
      s_gpu.aa_sx = (float)sx;
      s_gpu.aa_sy = (float)sy;
  
@@ -7814,7 +7793,7 @@ index 1280565..68f738e 100644
      s_gpu.clip_x = (s_gpu.clip_raw_h & 0xFFFF) * sx;
      s_gpu.clip_w = ((s_gpu.clip_raw_h >> 16) & 0xFFFF) * sx;
      s_gpu.clip_y = (s_gpu.clip_raw_v & 0xFFFF) * sy;
-@@ -846,11 +907,66 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+@@ -859,6 +920,60 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
      return ok;
  }
  
@@ -7872,7 +7851,10 @@ index 1280565..68f738e 100644
 +static void gpu_publish(uint32_t offset, uint32_t pitch, uint32_t rows);
 +static void gpu_report(void);
 +
- static void clear_surface(uint32_t param)
+ /* Swizzled colour surfaces (SURFACE_FORMAT type 2, log2 width/height in bits
+  * 16-19/24-27): render-to-texture. The pixel at (x, y) lives at the same
+  * Morton offset a swizzled texture of that size uses, so the texture sampler
+@@ -888,7 +1003,8 @@ static void clear_surface(uint32_t param)
  {
      uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
      uint32_t bpp = surface_bpp();
@@ -7882,7 +7864,7 @@ index 1280565..68f738e 100644
  
      /* A back end clears colour and/or depth/stencil itself (flags are the
       * CLEAR_SURFACE bits: Z 0x1, stencil 0x2, colour 0xF0). */
-@@ -867,6 +983,10 @@ static void clear_surface(uint32_t param)
+@@ -905,6 +1021,10 @@ static void clear_surface(uint32_t param)
          s_gpu.clears++;
          return;
      }
@@ -7893,12 +7875,22 @@ index 1280565..68f738e 100644
      if (!(param & NV097_CLEAR_COLOR_MASK))
          return;                            /* depth/stencil only */
      if (!s_gpu.color_offset || !s_gpu.pitch || !s_gpu.clip_h || bpp == 0)
-@@ -879,13 +999,14 @@ static void clear_surface(uint32_t param)
+@@ -917,9 +1037,10 @@ static void clear_surface(uint32_t param)
              return;
          s_gpu.color_base = base;
      }
 +    clear_rect(&cx0, &cy0, &cx1, &cy1);
  
+     surface_swizzle_update();
+-    if (s_swz_on) {
++    if (!gpu_cleared && s_swz_on) {
+         /* The clear covers CLEAR_RECT, not the surface clip: SSX 3 clears
+          * its 128x128 shadow maps whole but draws them through a 124x124
+          * clip, and samples them clamped -- the ring the clip leaves must be
+@@ -947,12 +1068,12 @@ static void clear_surface(uint32_t param)
+                     ((uint16_t *)base)[i] = v16;
+             }
+     } else
 -    for (y = 0; y < s_gpu.clip_h; y++) {
 +    for (y = 0; !gpu_cleared && y < cy1 - cy0; y++) {
          uint8_t *row = mem + s_gpu.color_base
@@ -7912,7 +7904,7 @@ index 1280565..68f738e 100644
                  p[x] = s_gpu.clear_color;
          } else if (bpp == 2) {
              /* The clear value is always given as A8R8G8B8; a 16-bit surface
-@@ -893,8 +1014,8 @@ static void clear_surface(uint32_t param)
+@@ -960,8 +1081,8 @@ static void clear_surface(uint32_t param)
              uint16_t v = (uint16_t)(((s_gpu.clear_color >> 8) & 0xF800)
                                    | ((s_gpu.clear_color >> 5) & 0x07E0)
                                    | ((s_gpu.clear_color >> 3) & 0x001F));
@@ -7923,7 +7915,7 @@ index 1280565..68f738e 100644
                  p[x] = v;
          }
      }
-@@ -1069,6 +1190,79 @@ static uint32_t linear_twin(uint32_t fmt)
+@@ -1140,6 +1261,79 @@ static uint32_t linear_twin(uint32_t fmt)
  }
  
  /* Sample texel (u, v) of stage texture `t`; `face` offsets a cube map. */
@@ -8003,7 +7995,7 @@ index 1280565..68f738e 100644
  static int sample_tex(const Texture *t, uint32_t face_offset,
                        uint32_t u, uint32_t v, uint32_t *argb)
  {
-@@ -1102,10 +1296,8 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1183,10 +1377,8 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          if (cache[slot].key != key || cache[slot].fmt != fmt
              || cache[slot].raw[0] != raw[0] || cache[slot].raw[1] != raw[1]) {
              uint32_t i;
@@ -8016,7 +8008,7 @@ index 1280565..68f738e 100644
              cache[slot].key = key;
              cache[slot].fmt = fmt;
              cache[slot].raw[0] = raw[0];
-@@ -2024,6 +2216,7 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
+@@ -2126,6 +2318,7 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
  #define NV_ZBUF_H 1024
  static struct { uint32_t offset; float *z; } s_zbufs[4];
  static int s_ftrace;            /* frame trace: 0 idle, 2 tracing, 3 done */
@@ -8024,7 +8016,7 @@ index 1280565..68f738e 100644
  static int s_zbuf_next;
  
  static float zclear_value(void)
-@@ -2056,24 +2249,44 @@ static float *zbuf_current(int create)
+@@ -2158,24 +2351,44 @@ static float *zbuf_current(int create)
  }
  
  static void zbuf_clear(void)
@@ -8079,7 +8071,7 @@ index 1280565..68f738e 100644
      default:    return 1;
      }
  }
-@@ -2131,6 +2344,23 @@ static uint32_t tex_face_stride(const Texture *t)
+@@ -2233,6 +2446,23 @@ static uint32_t tex_face_stride(const Texture *t)
      return (total + 127u) & ~127u;
  }
  
@@ -8103,7 +8095,7 @@ index 1280565..68f738e 100644
  /* One texel at normalised (swizzled/DXT) or texel (linear) coordinates, as
   * floats. An unusable stage reads white, so a missing texture multiplies
   * through instead of blacking the pixel out. */
-@@ -2138,6 +2368,34 @@ static void rc_texel(const Texture *t, uint32_t face, float u, float v,
+@@ -2240,6 +2470,34 @@ static void rc_texel(const Texture *t, uint32_t face, float u, float v,
                       float out[4])
  {
      uint32_t texel, mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
@@ -8138,7 +8130,7 @@ index 1280565..68f738e 100644
      if (tex_size_from_format(t->color)) {
          u *= (float)t->width;
          v *= (float)t->height;
-@@ -2279,11 +2537,78 @@ typedef struct {
+@@ -2381,11 +2639,78 @@ typedef struct {
      float iw[3], uv[3][2], stc[3][4][4], vfog[3], fogc[4], inv_area;
      float *zb;
      int minx, maxx, miny, maxy, use_rc, textured;
@@ -8217,7 +8209,7 @@ index 1280565..68f738e 100644
  static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
  {
      const float *a = T->a, *b = T->b, *c = T->c;
-@@ -2303,7 +2628,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+@@ -2405,7 +2730,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
                  continue;
              /* w1 is opposite a, w2 opposite b, w0 opposite c. */
              l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
@@ -8226,7 +8218,7 @@ index 1280565..68f738e 100644
              {
                  float *zp = T->zb ? &T->zb[(size_t)y * NV_ZBUF_W + x] : NULL;
                  int shade = (s_gpu.color_mask & 0x01010101u) || s_gpu.alpha_test;
-@@ -2319,7 +2644,15 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+@@ -2421,7 +2746,15 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
                      for (k = 0; k < 4; k++)
                          col[k] = l0 * va->d0[k] + l1 * vb->d0[k] + l2 * vc->d0[k];
                      pw = l0 * T->iw[0] + l1 * T->iw[1] + l2 * T->iw[2];
@@ -8243,7 +8235,7 @@ index 1280565..68f738e 100644
                          float d1[4], fog[4], t[4][4], out[4], tc[4];
                          int st, j, keep = 1;
                          for (k = 0; k < 4; k++)
-@@ -2335,6 +2668,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+@@ -2437,6 +2770,7 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
                              for (j = 0; j < 4; j++)
                                  tc[j] = (l0 * T->stc[0][st][j] + l1 * T->stc[1][st][j]
                                         + l2 * T->stc[2][st][j]) / pw;
@@ -8251,18 +8243,7 @@ index 1280565..68f738e 100644
                              keep = rc_stage_fetch(st, tc, t[st]);
                          }
                          if (!keep)
-@@ -2385,6 +2719,10 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
-  * few cores for the title and the host.
-  * ponytail: s_gpu.pixels/pixel_max in put_pixel are unsynchronised stats and
-  * may undercount; nothing depends on them. */
-+/* [br1] batch queue, defined below */
-+static volatile int s_pool_batch;
-+static void rq_run_rows(int k, int n, XfCount *cnt);
-+
- #define NV_RASTER_MAX_THREADS 16
- #define NV_RASTER_MT_MIN_PIXELS 8192
- 
-@@ -2397,14 +2735,41 @@ static struct {
+@@ -2500,6 +2834,20 @@ static struct {
      XfCount cnt[NV_RASTER_MAX_THREADS];
  } s_pool;
  
@@ -8280,6 +8261,10 @@ index 1280565..68f738e 100644
 +            SetEvent(s_pool.start[k]);
 +}
 +
+ /* Worker k owns the rows y with y % n == k, for every triangle of the run,
+  * in submission order. Each pixel therefore sees its triangles in the order
+  * the title drew them, whichever thread draws it. */
+@@ -2516,12 +2864,21 @@ static void xf_rows_owned(const XfTri *tris, int ntris, int k, int n,
  static DWORD WINAPI raster_worker(LPVOID arg)
  {
      int k = (int)(intptr_t)arg;
@@ -8297,17 +8282,14 @@ index 1280565..68f738e 100644
 +        }
 +        seen = s_pool_gen;
          memset(&s_pool.cnt[k], 0, sizeof s_pool.cnt[k]);
--        xf_rows(s_pool.tri, s_pool.tri->miny + k, s_pool.n, &s_pool.cnt[k]);
+         xf_rows_owned(s_pool.tris, s_pool.ntris, k, s_pool.n, &s_pool.cnt[k]);
 -        if (InterlockedDecrement(&s_pool.pending) == 0)
-+        if (s_pool_batch)
-+            rq_run_rows(k, s_pool.n, &s_pool.cnt[k]);
-+        else
-+            xf_rows(s_pool.tri, s_pool.tri->miny + k, s_pool.n, &s_pool.cnt[k]);
-+        if (InterlockedDecrement(&s_pool.pending) == 0 && !s_pool_batch)
-             SetEvent(s_pool.done);
+-            SetEvent(s_pool.done);
++        InterlockedDecrement(&s_pool.pending);   /* [rq2] the caller spins on it */
      }
      return 0;
-@@ -2423,6 +2788,8 @@ static int raster_pool_size(void)
+ }
+@@ -2539,6 +2896,8 @@ static int raster_pool_size(void)
          if (n < 1) n = 1;
          if (n > NV_RASTER_MAX_THREADS) n = NV_RASTER_MAX_THREADS;
          s_pool.n = n;
@@ -8316,115 +8298,66 @@ index 1280565..68f738e 100644
          if (n > 1) {
              s_pool.done = CreateEventA(NULL, FALSE, FALSE, NULL);
              for (k = 0; k < n - 1; k++) {
-@@ -2446,8 +2813,7 @@ static void xf_rows_parallel(const XfTri *T, XfCount *total)
-     }
-     s_pool.tri = T;
+@@ -2554,9 +2913,14 @@ static int raster_pool_size(void)
+ static void xf_rows_parallel(const XfTri *T, int ntris, long px,
+                              XfCount *total)
+ {
++    static long min_px = -1;
+     int n = raster_pool_size(), k;
+ 
+-    if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
++    if (min_px < 0) {                                  /* [rq2] tuned on Deathrow */
++        const char *m = getenv("RECOMP_RQ_MIN");
++        min_px = m ? atol(m) : 512;
++    }
++    if (n <= 1 || px < min_px) {
+         for (k = 0; k < ntris; k++)
+             xf_rows(&T[k], T[k].miny, 1, total);
+         return;
+@@ -2564,12 +2928,16 @@ static void xf_rows_parallel(const XfTri *T, int ntris, long px,
+     s_pool.tris = T;
+     s_pool.ntris = ntris;
      s_pool.pending = n - 1;
 -    for (k = 0; k < n - 1; k++)
 -        SetEvent(s_pool.start[k]);
 +    pool_kick(n - 1);                                  /* [rq2] */
      {
          XfCount mine = {0, 0, 0};
-         xf_rows(T, T->miny + (n - 1), n, &mine);
-@@ -2469,6 +2835,97 @@ static void xf_rows_parallel(const XfTri *T, XfCount *total)
- }
- #endif
- 
-+/* [br1] Batch-level parallel rasterisation: queue a batch's triangles, then
-+ * worker k draws rows y % n == k of all of them, in order. */
-+#define RQ_MAX 8192
-+typedef struct { XfTri T; Nv2aVshOutput v[3]; } RqEntry;
-+static RqEntry s_rq[RQ_MAX];
-+static int s_rq_n;
-+static long long s_rq_px;
-+static int s_rq_on = -1;
-+static long long s_rq_min = 512;    /* tuned: spdQ */
-+
-+static void rq_run_rows(int k, int n, XfCount *cnt)
-+{
-+    int i;
-+    for (i = 0; i < s_rq_n; i++) {
-+        const XfTri *T = &s_rq[i].T;
-+        int y0 = T->miny + (((k - T->miny % n) % n) + n) % n;
-+        if (y0 < T->maxy)
-+            xf_rows(T, y0, n, cnt);
-+    }
-+}
-+
-+static void rq_flush(void)
-+{
-+    XfCount tot = {0, 0, 0};
-+    int i;
-+
-+    if (!s_rq_n)
-+        return;
-+#if defined(_WIN32)
-+    {
-+        int n = raster_pool_size(), k;
-+        if (n > 1 && s_rq_px >= s_rq_min) {
-+            XfCount mine = {0, 0, 0};
-+            s_pool_batch = 1;
-+            s_pool.pending = n - 1;
-+            pool_kick(n - 1);                          /* [rq2] */
-+            rq_run_rows(n - 1, n, &mine);
-+            {                                             /* [rq2] spin */
-+                unsigned sp = 0;
-+                while (s_pool.pending) {
-+                    YieldProcessor();
-+                    if (++sp > (1u << 20))
-+                        Sleep(0);
-+                }
-+            }
-+            s_pool_batch = 0;
-+            tot = mine;
-+            for (k = 0; k < n - 1; k++) {
-+                tot.depth_fail += s_pool.cnt[k].depth_fail;
-+                tot.pixels += s_pool.cnt[k].pixels;
-+                tot.zpass += s_pool.cnt[k].zpass;
-+            }
-+            goto done;
++        unsigned sp = 0;
+         xf_rows_owned(T, ntris, n - 1, n, &mine);
+-        WaitForSingleObject(s_pool.done, INFINITE);
++        while (s_pool.pending) {                       /* [rq2] spin */
++            YieldProcessor();
++            if (++sp > (1u << 20))
++                Sleep(0);
 +        }
-+    }
-+#endif
-+    for (i = 0; i < s_rq_n; i++)
-+        xf_rows(&s_rq[i].T, s_rq[i].T.miny, 1, &tot);
-+#if defined(_WIN32)
-+done:
-+#endif
-+    s_gpu.xf_depth_fail += tot.depth_fail;
-+    s_gpu.xf_pixels += tot.pixels;
-+    s_gpu.zpass_count += tot.zpass;
-+    s_rq_n = 0;
-+    s_rq_px = 0;
-+}
-+
-+static int rq_push(const XfTri *T)
-+{
-+    RqEntry *e;
-+    if (s_rq_on < 0) {
-+        const char *v = getenv("RECOMP_RQ"), *m = getenv("RECOMP_RQ_MIN");
-+        s_rq_on = !(v && v[0] == '0');
-+        if (m) s_rq_min = atol(m);
-+        fprintf(stderr, "[RQ] batch raster %s, min %lld px\n",
-+                s_rq_on ? "on" : "off", s_rq_min);
-+    }
-+    if (!s_rq_on)
-+        return 0;
-+    if (s_rq_n == RQ_MAX)
-+        rq_flush();
-+    e = &s_rq[s_rq_n++];
-+    e->T = *T;
-+    e->v[0] = *T->va; e->v[1] = *T->vb; e->v[2] = *T->vc;
-+    e->T.va = &e->v[0]; e->T.vb = &e->v[1]; e->T.vc = &e->v[2];
-+    e->T.a = e->v[0].pos; e->T.b = e->v[1].pos; e->T.c = e->v[2].pos;
-+    s_rq_px += (long long)(T->maxx - T->minx) * (T->maxy - T->miny);
-+    return 1;
-+}
-+
- static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
-                                const Nv2aVshOutput *vc)
+         total->depth_fail += mine.depth_fail;
+         total->pixels += mine.pixels;
+         total->zpass += mine.zpass;
+@@ -2628,8 +2996,22 @@ static void xf_queue_flush(void)
+ 
+ static void xf_queue_push(const XfTri *T)
  {
-@@ -2562,12 +3019,37 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
++    static int on = -1;
+     XfQueued *q;
+ 
++    if (on < 0) {                                      /* [br1] */
++        const char *v = getenv("RECOMP_RQ");
++        on = !(v && v[0] == '0');
++    }
++    if (!on) {
++        XfCount cnt = {0, 0, 0};
++        xf_rows_parallel(T, 1, (long)(T->maxx - T->minx) * (T->maxy - T->miny), &cnt);
++        s_gpu.xf_depth_fail += cnt.depth_fail;
++        s_gpu.xf_pixels += cnt.pixels;
++        s_gpu.zpass_count += cnt.zpass;
++        return;
++    }
++
+     if (!s_xfq && !(s_xfq = (XfQueued *)malloc(XF_QUEUE_MAX * sizeof *s_xfq))) {
+         XfCount cnt = {0, 0, 0};
+         xf_rows_parallel(T, 1, 0, &cnt);
+@@ -2738,6 +3120,29 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
          return;
      }
      s_gpu.xf_drawn++;
@@ -8453,23 +8386,21 @@ index 1280565..68f738e 100644
 +    }
      T.inv_area = 1.0f / area;
  
--    xf_rows_parallel(&T, &cnt);
--    s_gpu.xf_depth_fail += cnt.depth_fail;
--    s_gpu.xf_pixels += cnt.pixels;
--    s_gpu.zpass_count += cnt.zpass;
-+    if (!rq_push(&T)) {                                 /* [br1] */
-+        xf_rows_parallel(&T, &cnt);
-+        s_gpu.xf_depth_fail += cnt.depth_fail;
-+        s_gpu.xf_pixels += cnt.pixels;
-+        s_gpu.zpass_count += cnt.zpass;
-+    }
-     s_gpu.tris_drawn++;
-     note_drawn();
- }
-@@ -2599,6 +3081,96 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
-  * like the vertices. Set by xf_set_viewport() for each batch. */
- static float s_xf_k[3], s_xf_o[3];
+     xf_queue_push(&T);
+@@ -2775,9 +3180,110 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+  * check, which is correct, just slower for huge off-screen triangles. */
+ #define NV_CLIP_W 1e-3f
  
+-/* The z offset of the current batch's screen-space transform (the near
+- * plane, see above), scaled like the vertices. Set by xf_set_viewport(). */
+-static float s_xf_o[3];
++/* The screen-space transform of the current batch, for taking vertices back
++ * to clip space: screen = clip.xyz / w * k + o. A program's is the viewport
++ * constants c[58] / c[59]; the fixed-function unit's is the offset c[59]
++ * (the scale is in the composite matrix). Both are scaled for anti-aliasing,
++ * like the vertices. Set by xf_set_viewport() for each batch. */
++static float s_xf_k[3], s_xf_o[3];
++
 +/* Deathrow: NV2A fixed-function transform, after xemu vsh-ff.c, so batches
 + * drawn without a vertex program are rasterised instead of skipped. Position
 + * follows the hardware: composite matrix, or skinning through MODEL_VIEW 0-3
@@ -8560,25 +8491,45 @@ index 1280565..68f738e 100644
 +    return 1;
 +}
 +
- static void xf_to_clip(const Nv2aVshOutput *v, const float k[3],
-                        const float o[3], float c[3])
++static void xf_to_clip(const Nv2aVshOutput *v, const float k[3],
++                       const float o[3], float c[3])
++{
++    int i;
++    for (i = 0; i < 3; i++)
++        c[i] = k[i] != 0.0f ? (v->pos[i] - o[i]) / k[i] * v->pos[3] : 0.0f;
++}
+ 
+ static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
+                     Nv2aVshOutput *out)
+@@ -2791,9 +3297,16 @@ static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
+ 
+ /* Signed distance of a vertex in (x*w, y*w, z*w, w) to clip plane `pl`:
+  * 0 is w = NV_CLIP_W, 1 the near plane. */
++/* [ff1] The near plane's screen z: the viewport's z offset, or 0 for the
++ * fixed-function transform, whose z carries none (ff_transform_vertex). */
++static float xf_near_o(void)
++{
++    return s_ff_active ? 0.0f : s_xf_o[2];
++}
++
+ static float xf_clip_dist(const Nv2aVshOutput *v, int pl)
  {
-@@ -2634,7 +3206,12 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
-         s_gpu.tris_behind++;                  /* wholly behind: nothing */
-         return;
+-    return pl == 0 ? v->pos[3] - NV_CLIP_W : v->pos[2] - s_xf_o[2] * v->pos[3];
++    return pl == 0 ? v->pos[3] - NV_CLIP_W : v->pos[2] - xf_near_o() * v->pos[3];
+ }
+ 
+ /* Sutherland-Hodgman: clip polygon in[0..n) against plane pl into out. */
+@@ -2814,7 +3327,7 @@ static int xf_clip_poly(const Nv2aVshOutput *in, int n, int pl,
+             if (pl == 0)
+                 v->pos[3] = NV_CLIP_W;
+             else
+-                v->pos[2] = s_xf_o[2] * v->pos[3];
++                v->pos[2] = xf_near_o() * v->pos[3];
+         }
      }
--    for (i = 0; i < 3; i++) { k[i] = s_xf_k[i]; o[i] = s_xf_o[i]; }
-+    if (s_ff_active) {           /* [ff1] composite already scaled: undo offset only */
-+        for (i = 0; i < 3; i++) { k[i] = s_xf_k[i]; o[i] = s_xf_o[i]; }   /* AA-scaled */
-+        o[2] = 0.0f;
-+    } else {
-+        for (i = 0; i < 3; i++) { k[i] = s_xf_k[i]; o[i] = s_xf_o[i]; }
-+    }
-     in[0] = a; in[1] = b; in[2] = c;
-     for (i = 0; i < 3; i++) {
-         const Nv2aVshOutput *p = in[i], *q = in[(i + 1) % 3];
-@@ -2662,10 +3239,257 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
-         raster_xf_triangle(&poly[0], &poly[i], &poly[i + 1]);
+     return m;
+@@ -2867,10 +3380,257 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+         raster_xf_triangle(&p0[0], &p0[i], &p0[i + 1]);
  }
  
 +/* [gx11] Full-screen draws whose texture is re-hashed at later flips. */
@@ -8835,7 +8786,24 @@ index 1280565..68f738e 100644
  /* Does this batch run the title's vertex program? RECOMP_NO_VSH turns the
   * interpreter off (the batch then falls to the screen-space heuristics). */
  static int batch_uses_program(void)
-@@ -2721,15 +3545,42 @@ static void xf_set_viewport(void)
+@@ -2921,21 +3681,59 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+ static void xf_set_viewport(void)
+ {
+     const float *of = nv2a_vsh_constant(59);
++    int i;
+ 
++    /* [ff1] s_xf_k: the scale, for raster_xf_line's near cut. */
++    if (batch_uses_program()) {
++        const float *sc = nv2a_vsh_constant(58);
++        for (i = 0; i < 3; i++)
++            s_xf_k[i] = sc[i];
++    } else {
++        s_xf_k[0] = s_xf_k[1] = s_xf_k[2] = 1.0f;
++    }
++    s_xf_k[0] *= s_gpu.aa_sx;
++    s_xf_k[1] *= s_gpu.aa_sy;
+     s_xf_o[0] = of[0] * s_gpu.aa_sx;
+     s_xf_o[1] = of[1] * s_gpu.aa_sy;
      s_xf_o[2] = of[2];
  }
  
@@ -8843,7 +8811,7 @@ index 1280565..68f738e 100644
  static void raster_batch_program(void)
 +{
 +    raster_batch_program_inner();
-+    rq_flush();
++    xf_queue_flush();
 +}
 +
 +static void raster_batch_program_inner(void)
@@ -8881,7 +8849,7 @@ index 1280565..68f738e 100644
      xf_set_viewport();
      {
          const VertexAttr *tc = texcoord_attr();
-@@ -2827,6 +3678,93 @@ static void raster_batch_program(void)
+@@ -3033,6 +3831,93 @@ static void raster_batch_program(void)
      }
      if (s_gpu.texs[0].valid)
          note_texture_use();
@@ -8975,7 +8943,7 @@ index 1280565..68f738e 100644
  
      switch (s_gpu.prim) {
      case NV_PRIM_TRIANGLES:
-@@ -2854,6 +3792,26 @@ static void raster_batch_program(void)
+@@ -3060,6 +3945,26 @@ static void raster_batch_program(void)
              raster_xf_clipped(&s_xf[i], &s_xf[i+3], &s_xf[i+2]);
          }
          break;
@@ -9002,7 +8970,7 @@ index 1280565..68f738e 100644
      default:
          break;
      }
-@@ -2861,25 +3819,1408 @@ static void raster_batch_program(void)
+@@ -3069,44 +3974,1428 @@ static void raster_batch_program(void)
          backend_flush(!s_xf_no_tex);
  }
  
@@ -9050,6 +9018,7 @@ index 1280565..68f738e 100644
  
 -    /* Count why, once per batch: the texture stage cannot change inside one. */
 -    {
+-        const VertexAttr *tc = texcoord_attr();
 +/* ---- GPU back end: D3D11 (RECOMP_PB_BACKEND=d3d11) ------------------------
 + *
 + * nv2a_gpu_d3d11.cpp (from aknavj/xboxrecomp, MIT) draws a batch on the host
@@ -9079,7 +9048,15 @@ index 1280565..68f738e 100644
 +static struct {
 +    uint64_t batches[GPU_KINDS], fallbacks, clears, clear_fallbacks, flushes, zpass_batches;
 +} s_gpu_stat;
-+
+ 
+-        if (!(tc->offset && tc->stride))
+-            s_gpu.batches_no_uv++;
+-        else if (!s_gpu.texs[0].valid)
+-            s_gpu.batches_no_tex++;
+-        else {
+-            s_gpu.batches_textured++;
+-            textured = 1;
+-            note_texture_use();
 +static int gpu_backend_on(void)
 +{
 +    if (s_gpu_on < 0) {
@@ -9096,11 +9073,17 @@ index 1280565..68f738e 100644
 +                    ? "on: batches draw on the GPU; the CPU rasteriser takes the ones it refuses"
 +                    : "unavailable: the CPU rasteriser draws everything");
 +            fflush(stderr);
-+        }
-+    }
+         }
+     }
 +    return s_gpu_on;
 +}
-+
+ 
+-    switch (s_gpu.prim) {
+-    case NV_PRIM_TRIANGLES:
+-        for (i = 0; i + 2 < s_gpu.idx_count; i += 3)
+-            raster_indexed(s_gpu.idx[i], s_gpu.idx[i+1], s_gpu.idx[i+2],
+-                           vertex_color(s_gpu.idx[i]));
+-        break;
 +/* Before the CPU reads or writes a surface: put the GPU's results into guest
 + * memory. nv2a_gpu_flush also marks every surface for refresh, so the next GPU
 + * draw re-reads whatever the CPU wrote. */
@@ -10422,18 +10405,30 @@ index 1280565..68f738e 100644
 +
 +    /* Count why, once per batch: the texture stage cannot change inside one. */
 +    {
-         const VertexAttr *tc = texcoord_attr();
- 
-         if (!(tc->offset && tc->stride))
-@@ -2893,6 +5234,7 @@ static void raster_batch(void)
-         }
-     }
- 
++        const VertexAttr *tc = texcoord_attr();
++
++        if (!(tc->offset && tc->stride))
++            s_gpu.batches_no_uv++;
++        else if (!s_gpu.texs[0].valid)
++            s_gpu.batches_no_tex++;
++        else {
++            s_gpu.batches_textured++;
++            textured = 1;
++            note_texture_use();
++        }
++    }
++
 +    gx_log_batch("screen", NULL, NULL);                  /* [gx8] */
-     switch (s_gpu.prim) {
-     case NV_PRIM_TRIANGLES:
-         for (i = 0; i + 2 < s_gpu.idx_count; i += 3)
-@@ -2932,8 +5274,24 @@ static void raster_batch(void)
++    switch (s_gpu.prim) {
++    case NV_PRIM_TRIANGLES:
++        for (i = 0; i + 2 < s_gpu.idx_count; i += 3)
++            raster_indexed(s_gpu.idx[i], s_gpu.idx[i+1], s_gpu.idx[i+2],
++                           vertex_color(s_gpu.idx[i]));
++        break;
+     case NV_PRIM_TRIANGLE_STRIP:
+         for (i = 0; i + 2 < s_gpu.idx_count; i++)
+             raster_indexed(s_gpu.idx[i], s_gpu.idx[i+1], s_gpu.idx[i+2],
+@@ -3140,8 +5429,24 @@ static void raster_batch(void)
                             vertex_color(s_gpu.idx[i]));
          }
          break;
@@ -10459,7 +10454,7 @@ index 1280565..68f738e 100644
      }
      if (backend_draws())
          backend_flush(textured);
-@@ -2981,16 +5339,31 @@ static void frame_trace_flip(void)
+@@ -3189,16 +5494,31 @@ static void frame_trace_flip(void)
              s_ftrace = 0;
          return;
      }
@@ -10491,7 +10486,7 @@ index 1280565..68f738e 100644
          s_ftrace = 2;
          fprintf(stderr, "[FTRACE] frame begins (flip %u)\n", s_gpu.flips);
      }
-@@ -3386,6 +5759,65 @@ static int imm_vertex_method(uint32_t method, uint32_t param)
+@@ -3594,6 +5914,65 @@ static int imm_vertex_method(uint32_t method, uint32_t param)
      }
      return 0;
  }
@@ -10557,7 +10552,7 @@ index 1280565..68f738e 100644
  /* The texture stage registers, all four stages. Stage i's registers are
   * 0x1B00 + 0x40*i onwards; only stage 0 used to be decoded, which was
   * enough for menus drawn one texture at a time and not for a 3D frame that
-@@ -3438,6 +5870,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+@@ -3650,6 +6029,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
          break;
      }
      tex_update_valid(t);
@@ -10566,7 +10561,7 @@ index 1280565..68f738e 100644
      if (stage == 0)
          record_tex_reg(method, param);
  }
-@@ -3498,6 +5932,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3800,6 +6181,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -10582,7 +10577,7 @@ index 1280565..68f738e 100644
      if (s_ftrace == 2) {
          /* RECOMP_FRAME_TRACE_METHODS: every method of the traced frame,
           * less the bulk (vertex data, program and constant uploads). */
-@@ -3554,6 +5997,17 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3856,6 +6246,17 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          *r = param;
          return;
      }
@@ -10600,7 +10595,7 @@ index 1280565..68f738e 100644
      if (subch != 0) {                      /* 3D class lives on subchannel 0 */
          note_unhandled(method, param);
          return;
-@@ -3570,6 +6024,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3872,6 +6273,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case NV097_SET_SURFACE_FORMAT:
          s_gpu.format = param;
          surface_apply_clip();
@@ -10626,9 +10621,9 @@ index 1280565..68f738e 100644
 +            }
 +        }
          break;
-     case NV097_SET_SURFACE_PITCH:
-         s_gpu.pitch = param & 0xFFFF;      /* colour pitch; zeta is the top half */
-@@ -3630,9 +6105,31 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     case 0x1D98:                       /* SET_CLEAR_RECT_HORIZONTAL */
+         s_gpu.clear_rect_h = param;
+@@ -3940,9 +6362,31 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
          uint32_t at = dma_resolve(param & 0x00FFFFFFu);
          uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
@@ -10660,7 +10655,7 @@ index 1280565..68f738e 100644
          break;
      }
      case NV097_SET_BLEND_COLOR:
-@@ -3649,7 +6146,43 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3959,7 +6403,43 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -10704,7 +10699,7 @@ index 1280565..68f738e 100644
          if (param & 0x01)                         /* Z */
              zbuf_clear();
          break;
-@@ -3664,6 +6197,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3974,6 +6454,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              /* Three ways a batch can have arrived, and only one is in use at
               * a time: vertices completed by SET_VERTEX4F, a payload written
               * with INLINE_ARRAY, or indices into the title's own arrays. */
@@ -10712,7 +10707,7 @@ index 1280565..68f738e 100644
              if (s_gpu.imm_count)
                  draw_immediate();
              else if (s_gpu.inline_count)
-@@ -3705,6 +6239,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4015,6 +6496,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  
      case NV097_ARRAY_ELEMENT16:
          /* Two 16-bit indices per parameter word. */
@@ -10724,7 +10719,7 @@ index 1280565..68f738e 100644
          if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
              s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
-@@ -3737,16 +6276,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4059,6 +6545,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                           ? (s_gpu.flip_write + 1) % s_gpu.flip_modulo
                           : s_gpu.flip_write + 1;
          s_gpu.flips++;
@@ -10732,7 +10727,10 @@ index 1280565..68f738e 100644
          frame_trace_flip();
          return;
  
-     case NV097_FLIP_STALL:
+@@ -4072,13 +6559,30 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         uint32_t stall_vbl;
+         (void)flip_clock(stall_ns, &clock_ok);
+         stall_vbl = s_walk_vbl;
 +        if (!s_title_flipped) {
 +            s_title_flipped = 1;
 +            fprintf(stderr, "[GPU] the title flips: frames are shown at its flips from now on\n");
@@ -10743,15 +10741,17 @@ index 1280565..68f738e 100644
 +#ifdef _WIN32
 +        /* The stall is where the hardware holds the GPU until the flip, at
 +         * the vblank the swap's presentation interval names: D3D's own flip
-+         * when its interrupt handler took the swap, else our own clock. */
-+        if (!gpu_wait_d3d_flip())
++         * when its interrupt handler took the swap, else our own clock.
++         * Upstream's flip hold (RECOMP_FLIP_PACING) paces instead when on. */
++        if (!nv2a_pb_exec_flip_pacing() && !gpu_wait_d3d_flip())
 +            gpu_pace_flip();
 +#endif
          if (s_ftrace == 2)
              fprintf(stderr, "[FTRACE] FLIP_STALL presenting %08X (color now %08X)%c",
                      s_gpu.drawn_offset, s_gpu.color_offset, 10);
          /* The stall ends when the buffer being read is the one just finished.
--         * There is no scanout here to wait for, so that is now. */
+-         * There is no scanout here to wait for, so that is now; when the
+-         * title may go on is the flip hold's (below). */
 -        s_gpu.flip_read = s_gpu.flip_write;
 +         * There is no scanout here to wait for, so that is now -- unless
 +         * D3D's vblank handler makes the flips, and then the read side is
@@ -10761,7 +10761,7 @@ index 1280565..68f738e 100644
          /* And this is a completed swap, which is what a title's own swap
           * counter counts -- see xbox_Nv2aFrameCounterFlip. */
          xbox_Nv2aFrameCounterFlip();
-@@ -3771,6 +6328,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4103,6 +6607,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              uint32_t pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch
                                                  : s_gpu.pitch;
              if (done) {
@@ -10770,7 +10770,7 @@ index 1280565..68f738e 100644
                  xbox_FramebufferWindowSet(dma_resolve(done), pitch);
                  xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
                  xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
-@@ -3800,6 +6359,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4132,6 +6638,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          s_gpu.drawn_stale = 1;
          if (s_backend && s_backend->flip)
              s_backend->flip();
@@ -10780,7 +10780,7 @@ index 1280565..68f738e 100644
  
          if (verbose) {
              static unsigned n;
-@@ -3876,6 +6438,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4221,6 +6730,54 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * them -- so they are constants that happen to arrive by method.
           * Dropped, every vertex program put its whole batch at the origin:
           * no 3D anywhere, and a black car on the garage screen. */
@@ -10835,16 +10835,16 @@ index 1280565..68f738e 100644
          if (method >= 0x0A20 && method < 0x0A30) {
              nv2a_vsh_constant_component(59, (method - 0x0A20) / 4, param);
              break;
-@@ -4098,6 +6708,7 @@ void nv2a_pb_exec_report(void)
+@@ -4456,6 +7013,7 @@ void nv2a_pb_exec_report(void)
          last_flips = s_gpu.flips;
          last_ms = now;
      }
 +    gpu_report();
+     flip_hold_report();
      fprintf(stderr, "[GPU] surface 0x%08X pitch %u clip %ux%u+%u+%u"
                      " clears %u | %u unhandled methods (%d distinct)\n",
-             s_gpu.color_offset, s_gpu.pitch, s_gpu.clip_w, s_gpu.clip_h,
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 0f3ba51..74b0a85 100644
+index e3a16e2..e00441d 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
 @@ -38,7 +38,9 @@ static int s_seen_count;
@@ -10857,7 +10857,7 @@ index 0f3ba51..74b0a85 100644
  
  /* Executing is opt-in separately from surveying: a survey is read-only, while
   * the executor writes to guest memory. */
-@@ -194,6 +196,17 @@ void nv2a_pb_scan_report(void)
+@@ -195,6 +197,17 @@ void nv2a_pb_scan_report(void)
  #define PB_PHYS_MASK 0x0FFFFFFCu
  #define PB_RAM_BYTES (64u * 1024u * 1024u)   /* XBOX_CONTIG_SIZE */
  
@@ -10875,7 +10875,7 @@ index 0f3ba51..74b0a85 100644
  /* A jump or call outside RAM means the walk is reading data as commands. */
  /* The last command headers decoded, so a desync can be traced back to the
   * command that caused it. */
-@@ -215,7 +228,7 @@ static int pb_bad_target(uint32_t w, uint32_t at, uint32_t target, uint32_t put)
+@@ -216,7 +229,7 @@ static int pb_bad_target(uint32_t w, uint32_t at, uint32_t target, uint32_t put)
  {
      static unsigned total;
      unsigned k;
@@ -10884,7 +10884,7 @@ index 0f3ba51..74b0a85 100644
          return 0;
      if (++total <= 16 || total % 100 == 0) {
          fprintf(stderr, "  [PB] bad target #%u 0x%08X from word 0x%08X at 0x%08X"
-@@ -277,7 +290,7 @@ void nv2a_pb_resync(uint32_t get_phys)
+@@ -278,7 +291,7 @@ void nv2a_pb_resync(uint32_t get_phys)
   * executor, up to PUT. */
  static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
  {
@@ -10893,7 +10893,7 @@ index 0f3ba51..74b0a85 100644
          uint32_t m = s_pend_noninc ? s_pend_method : s_pend_method + s_pend_i * 4;
          uint32_t param = *(const uint32_t *)(mem + (0x80000000u | s_get));
  
-@@ -336,7 +349,7 @@ void nv2a_pb_scan(uint32_t put_phys)
+@@ -337,7 +350,7 @@ void nv2a_pb_scan(uint32_t put_phys)
          if (s_exec_enabled && (++s_ack_tick & 0xFFu) == 0)
              xbox_Nv2aAckBusyBits();
  
@@ -10902,7 +10902,7 @@ index 0f3ba51..74b0a85 100644
              s_get = put, s_pend_left = 0;
              break;
          }
-@@ -468,6 +481,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+@@ -474,6 +487,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
  
      while (va < end_va && words < 0x100000u) {
          uint32_t w = *(const uint32_t *)(mem + va);
@@ -10910,7 +10910,7 @@ index 0f3ba51..74b0a85 100644
          va += 4;
          words++;
  
-@@ -475,8 +489,11 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+@@ -481,8 +495,11 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
              uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
                                               : (w & 0x1FFFFFFCu);
              (*jumps)++;
@@ -10924,7 +10924,7 @@ index 0f3ba51..74b0a85 100644
              va = 0x80000000u | (target & 0x0FFFFFFFu);
              end_va = va + 0x400000u;
              continue;
-@@ -502,7 +519,12 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+@@ -510,7 +527,12 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
  
              for (uint32_t i = 0; i < count && va < end_va; i++) {
                  uint32_t m = noninc ? method : method + i * 4;
@@ -10938,7 +10938,7 @@ index 0f3ba51..74b0a85 100644
                  if (s_exec_enabled)
                      nv2a_pb_exec_method(subch, m,
                                          *(const uint32_t *)(mem + va));
-@@ -532,3 +554,25 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
+@@ -544,3 +566,25 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
      s_tot_jumps += jumps;
      s_tot_segments++;
  }
@@ -10965,7 +10965,7 @@ index 0f3ba51..74b0a85 100644
 +    return 0;
 +}
 diff --git a/src/kernel/nv2a_vsh_interp.c b/src/kernel/nv2a_vsh_interp.c
-index c3fba75..0ef44e9 100644
+index c1b48e4..4e2cbcb 100644
 --- a/src/kernel/nv2a_vsh_interp.c
 +++ b/src/kernel/nv2a_vsh_interp.c
 @@ -47,6 +47,7 @@ static int vsh_dump_enabled(void)
@@ -11028,7 +11028,7 @@ index c3fba75..0ef44e9 100644
  {
      static int dump = -1;
      static uint32_t dumped[16];
-@@ -423,3 +437,161 @@ int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+@@ -430,3 +444,161 @@ int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
      }
      return 0;
  }
@@ -11205,10 +11205,10 @@ index 8acb0af..0bd5095 100644
 +
  #endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 362cefe..a48a201 100644
+index b723a92..6554002 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
-@@ -72,6 +72,17 @@ static HANDLE g_mapping_handle = NULL;
+@@ -73,6 +73,17 @@ static HANDLE g_mapping_handle = NULL;
  
  /* Mirror view pointers for cleanup */
  static void *g_mirror_views[XBOX_NUM_MIRRORS] = {0};
@@ -11226,7 +11226,7 @@ index 362cefe..a48a201 100644
  
  /* The base view and its 28 mirrors occupy one contiguous span. Reserving that
   * span up front is what makes the mirrors placeable at all: each one sits at
-@@ -438,6 +449,7 @@ static volatile LONG g_nv2a_ack_stop = 0;
+@@ -439,6 +450,7 @@ static volatile LONG g_nv2a_ack_stop = 0;
   */
  static const struct { uint32_t offset; uint32_t busy_mask; } NV2A_ACK[] = {
      { 0x100410, 0x00010000u },  /* PFB flush kick, Halo 0x001EF930 */
@@ -11234,7 +11234,7 @@ index 362cefe..a48a201 100644
  
      /* Interrupt status registers. These are write-1-to-clear on hardware, so
       * an ISR "clearing" one writes the pending bit back -- against plain RAM
-@@ -1281,7 +1293,57 @@ static void fence_mirrors_tick(void)
+@@ -1309,6 +1321,55 @@ static void fence_mirrors_tick(void)
      }
  }
  
@@ -11288,11 +11288,9 @@ index 362cefe..a48a201 100644
 +}
 +
  static int s_nv2a_trace = 0;
-+static int s_nv2a_kick_log = 0;   /* [si1] RECOMP_NV2A_TRACE itself: a line per kick */
- 
- /* The display framebuffer, as reported by AvSetDisplayMode. Checksummed once a
-  * second so a run can answer the only question that matters before building a
-@@ -1350,19 +1412,97 @@ static void framebuffer_probe_tick(void)
+ /* The per-kick DMA_PUT line, only on an explicit RECOMP_NV2A_TRACE. The
+  * executor sets s_nv2a_trace too, and a line plus an fflush per kick is
+@@ -1390,18 +1451,95 @@ static void framebuffer_probe_tick(void)
   * and a level load, thousands of kickoffs long, looked frozen. Clearing them
   * from inside the walk answers the kickoff within a few hundred commands,
   * without a thread of its own spinning on a host core. */
@@ -11356,7 +11354,7 @@ index 362cefe..a48a201 100644
 +    return offset == 0x000100 || offset == 0x400100 || offset == 0x600100;
 +}
 +
- void xbox_Nv2aAckBusyBits(void)
+ static void nv2a_ack_busy_bits(int flip_held)
  {
      volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
 +    int held;
@@ -11374,24 +11372,29 @@ index 362cefe..a48a201 100644
      for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
          volatile uint32_t *r =
              (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
--        if (*r & NV2A_ACK[i].busy_mask) {
+         uint32_t mask = NV2A_ACK[i].busy_mask;
 +        uint32_t v;
-+        if (held && nv2a_is_intr_status(NV2A_ACK[i].offset))
++        if (held && nv2a_is_intr_status(NV2A_ACK[i].offset))    /* [si1] */
 +            continue;
+         if (flip_held && NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH)
+             continue;
 +        v = *r;
-+        if (v & NV2A_ACK[i].busy_mask) {
-+            if (NV2A_ACK[i].offset == 0x008700) {
-+                InterlockedExchange(&s_pvideo_buffer, (LONG)(v & 0x11u));
-+                InterlockedIncrement(&s_pvideo_submits);
-+            }
-             *r &= ~NV2A_ACK[i].busy_mask;
-         }
++        if ((v & mask) && NV2A_ACK[i].offset == 0x008700) {
++            InterlockedExchange(&s_pvideo_buffer, (LONG)(v & 0x11u));
++            InterlockedIncrement(&s_pvideo_submits);
++        }
+         /* Once the vblank is delivered its two bits belong to the
+          * vblank-ack thread (kernel_bridge.c), which clears them on the
+          * DPC's ack. Cleared here too, a pass that landed between the
+@@ -1419,6 +1557,7 @@ static void nv2a_ack_busy_bits(int flip_held)
+         if (*r & mask)
+             InterlockedAnd((volatile LONG *)r, (LONG)~mask);
      }
 +    ReleaseSRWLockShared(&s_intr_lock);
  }
  
- /* One word of the NV2A register file (offset from the register base), or NULL
-@@ -1400,7 +1540,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+ void xbox_Nv2aAckBusyBits(void)
+@@ -1474,7 +1613,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           *
           * The advance now happens after the scan, further down, which is
           * also the only ordering that gives the title real back-pressure. */
@@ -11407,16 +11410,16 @@ index 362cefe..a48a201 100644
          dsp_ack_tick();
          poke_tick();
          counter_mirrors_tick();
-@@ -1429,6 +1576,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
-             DWORD now_ms = GetTickCount();
+@@ -1504,6 +1650,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
-             if (put != last_put || (now_ms - last_put_ms) > 2000) {
+             if (!flip_held
+                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
 +                LONG kick = put != last_put
 +                          ? InterlockedIncrement(&g_pb_kicks_seen) : 0;
                  /* Survey the segment the title just submitted, once. */
                  {
                      extern void nv2a_pb_scan(uint32_t);
-@@ -1479,14 +1628,48 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1554,14 +1702,48 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                              nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
                                                   XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
                          } else if (last_put && put < last_put) {
@@ -11473,7 +11476,7 @@ index 362cefe..a48a201 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -1516,6 +1699,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1591,6 +1773,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      get_written = put;
                  }
                  last_put = put; last_put_ms = now_ms;
@@ -11482,28 +11485,7 @@ index 362cefe..a48a201 100644
                  /* GET as well as PUT. A title that stops submitting has either
                   * finished or is spinning on the GPU catching up, and only GET
                   * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -1525,14 +1710,18 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
-                  * in its device struct rather than assuming 0xFD800000, and
-                  * mirroring the wrong block leaves it spinning on a GET that
-                  * never moves. */
--                if (s_nv2a_trace) {
-+                /* [si1] Only when asked for by name. RECOMP_PB_EXEC, which
-+                 * every run sets, used to print and flush this on every kick,
-+                 * from the thread that answers the title's kicks, so a title
-+                 * spinning on the kick ack waited on the log file. */
-+                if (s_nv2a_kick_log) {
-                     uint32_t g = *(volatile uint32_t *)
-                                  ((char *)regs + NV2A_USER_DMA_GET);
-                     fprintf(stderr, "  [NV2A] DMA_PUT = 0x%08X  DMA_GET = "
-                             "0x%08X%s\n", put, g,
-                             g == put ? "" : "  (GPU behind)");
-+                    fflush(stderr);
-                 }
--                fflush(stderr);
-             }
-         }
-         if (s_nv2a_trace) {
-@@ -1562,6 +1751,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1637,6 +1821,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -11512,7 +11494,7 @@ index 362cefe..a48a201 100644
          Sleep(0);  /* yield; the waiter is spinning on another core */
      }
      return 0;
-@@ -1641,6 +1832,17 @@ extern volatile uint32_t g_icall_trace_idx;
+@@ -1716,6 +1902,17 @@ extern volatile uint32_t g_icall_trace_idx;
  void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
                                uint32_t edi0, uint32_t esp0)
  {
@@ -11530,7 +11512,7 @@ index 362cefe..a48a201 100644
      enum { SLOTS = 32 };
      static uint32_t seen[SLOTS];
      static uint64_t hits[SLOTS];
-@@ -2356,6 +2558,17 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+@@ -2431,6 +2628,17 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
                  WD_NV2A(NV2A_PFIFO_DMA_PUT), WD_NV2A(NV2A_PFIFO_DMA_GET),
                  WD_NV2A(NV2A_PFIFO_REF), WD_NV2A(NV2A_PFIFO_DMA_SUBROUTINE));
  #undef WD_NV2A
@@ -11548,15 +11530,7 @@ index 362cefe..a48a201 100644
      }
  
      for (i = 0; i < 400 && esp; i++) {
-@@ -3134,6 +3347,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
-         g_nv2a_memory = layout_commit_at((LPVOID)nv2a_native, XBOX_NV2A_SIZE);
-         /* The pushbuffer survey rides on the same poll, so either
-          * variable arms it. */
-+        s_nv2a_kick_log = getenv("RECOMP_NV2A_TRACE") != NULL;
-         s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
-                     || getenv("RECOMP_PB_SCAN") != NULL
-                     || getenv("RECOMP_PB_EXEC") != NULL;
-@@ -3405,6 +3619,45 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -3484,6 +3692,45 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  (int)((mirrors_ok + 1) * g_memory_size / (1024 * 1024)));
      }
  
@@ -11602,7 +11576,7 @@ index 362cefe..a48a201 100644
      /* Guest address space above the mirrors, for titles that ask for a specific
       * high address. RECOMP_EXT_VMA; a no-op without it. Straight after the
       * mirrors, while a fixed host address is still likely to be free. */
-@@ -3590,6 +3843,11 @@ void xbox_MemoryLayoutShutdown(void)
+@@ -3669,6 +3916,11 @@ void xbox_MemoryLayoutShutdown(void)
       * tiled alias, and every one of those comes back as "failed" while init
       * still returns TRUE because they are best-effort. The result is a layout
       * that looks initialised and has no device apertures at all. */
@@ -11614,7 +11588,7 @@ index 362cefe..a48a201 100644
      if (g_tiled_view) {
          UnmapViewOfFile(g_tiled_view);
          g_tiled_view = NULL;
-@@ -4039,6 +4297,130 @@ static void contig_take(uint32_t first, uint32_t n)
+@@ -4118,6 +4370,130 @@ static void contig_take(uint32_t first, uint32_t n)
          g_contig_first_free++;
  }
  
@@ -11742,19 +11716,19 @@ index 362cefe..a48a201 100644
 +    g_contig_len[first] = 0;
 +}
 +
- uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
-                                 uint32_t phys_lo, uint32_t phys_hi)
- {
-@@ -4060,6 +4442,8 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+ /* Whether page q may start or extend a new block.
+  *
+  * The first pass also keeps out of the loaded image's physical range. Here
+@@ -4173,6 +4549,8 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
      if (limit > CONTIG_USABLE) limit = CONTIG_USABLE;
  
      contig_lock();
 +    contig_release_held(0);
 +retry:
      if (lo_page < g_contig_first_free) lo_page = g_contig_first_free;
-     p = (lo_page + align_pages - 1) & ~(align_pages - 1);
-     while ((uint64_t)p + n <= limit) {
-@@ -4083,6 +4467,15 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
+     for (pass = contig_avoid_image() ? 0 : 1; pass < 2 && !result; pass++) {
+         int avoid = pass == 0;
+@@ -4199,6 +4577,15 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
      if (result) {
          g_contig_allocs++;
          contig_report("alloc", result, n);
@@ -11770,7 +11744,7 @@ index 362cefe..a48a201 100644
      } else {
          uint32_t best = 0, run = 0;
          for (q = 0; q < CONTIG_USABLE; q++) {
-@@ -4167,13 +4560,19 @@ int xbox_ContiguousFree(uint32_t va)
+@@ -4283,13 +4670,19 @@ int xbox_ContiguousFree(uint32_t va)
          }
          return 0;
      }
@@ -11795,7 +11769,7 @@ index 362cefe..a48a201 100644
      contig_unlock();
      return 1;
  }
-@@ -4226,85 +4625,52 @@ uint32_t xbox_ContiguousInUseBytes(void)
+@@ -4342,85 +4735,52 @@ uint32_t xbox_ContiguousInUseBytes(void)
      return g_contig_pages_in_use * CONTIG_PAGE;
  }
  
@@ -11916,7 +11890,7 @@ index 362cefe..a48a201 100644
  }
  
  
-@@ -4491,7 +4857,7 @@ void xbox_HeapFree(uint32_t xbox_va)
+@@ -4607,7 +4967,7 @@ void xbox_HeapFree(uint32_t xbox_va)
           * over the empty slots (size 0) earlier merges leave behind; without
           * that, one merge stops every later one dead. */
          {
@@ -11925,7 +11899,7 @@ index 362cefe..a48a201 100644
              if (xbox_HeapReclaimEnabled()) {
                  while (n < g_heap_block_count && g_heap_blocks[n].size == 0) n++;
                  while (p >= 0 && g_heap_blocks[p].size == 0) p--;
-@@ -4507,12 +4873,7 @@ void xbox_HeapFree(uint32_t xbox_va)
+@@ -4623,12 +4983,7 @@ void xbox_HeapFree(uint32_t xbox_va)
                  g_heap_blocks[p].size += g_heap_blocks[i].size;
                  g_heap_blocks[i].size = 0;
                  g_heap_blocks[i].addr = 0;
@@ -11939,10 +11913,10 @@ index 362cefe..a48a201 100644
          ReleaseSRWLockExclusive(&g_heap_lock);
          return;
 diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
-index 14eee45..e826313 100644
+index 67a8792..c60c18b 100644
 --- a/src/kernel/xbox_memory_layout.h
 +++ b/src/kernel/xbox_memory_layout.h
-@@ -206,14 +206,20 @@ uint32_t xbox_ContiguousAllocatedBytes(void);
+@@ -210,14 +210,20 @@ uint32_t xbox_ContiguousAllocatedBytes(void);
  /* One byte per 4 KB page of the window, nonzero while the page is allocated
   * (or claimed). Read without the arena lock; a device model's view. */
  const volatile uint8_t *xbox_ContiguousPageMap(void);
@@ -11972,10 +11946,10 @@ index 14eee45..e826313 100644
  
  int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
-index d45d8bb..01cbde9 100644
+index efa5046..b5be955 100644
 --- a/src/usb/ohci.c
 +++ b/src/usb/ohci.c
-@@ -183,6 +183,22 @@ static int s_npads = 1;          /* RECOMP_USB_PADS */
+@@ -185,6 +185,22 @@ static int s_npads = 1;          /* RECOMP_USB_PADS */
  static int s_enabled;
  static int s_trace;
  
@@ -11998,7 +11972,7 @@ index d45d8bb..01cbde9 100644
  static uint32_t *reg_of(OhciController *hc, uint32_t off)
  {
      return (off < OHCI_REG_MAX) ? &hc->reg[off / 4] : NULL;
-@@ -226,6 +242,41 @@ static uint64_t ohci_read(void *dev, uint32_t off, int size)
+@@ -228,6 +244,41 @@ static uint64_t ohci_read(void *dev, uint32_t off, int size)
      return v;
  }
  
@@ -12040,7 +12014,7 @@ index d45d8bb..01cbde9 100644
  static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
  {
      OhciController *hc = (OhciController *)dev;
-@@ -253,9 +304,9 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+@@ -255,9 +306,9 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
           * a driver polls for exactly that. Leaving it set is a hang, and it
           * is the first thing a driver does, so it would be the only thing
           * anyone ever saw of this file. */
@@ -12052,7 +12026,7 @@ index d45d8bb..01cbde9 100644
              hc->reg[HcControl / 4] &= ~0xC0u;    /* back to UsbReset state  */
              hc->reg[HcInterruptStatus / 4] = 0;
              hc->reg[HcInterruptEnable / 4] = 0;
-@@ -263,6 +314,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+@@ -265,6 +316,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
          return;
  
      case HcInterruptStatus:
@@ -12060,7 +12034,7 @@ index d45d8bb..01cbde9 100644
          /* Acknowledging WritebackDoneHead retires the done list.
           *
           * The controller publishes the queue in HccaDoneHead and raises WDH;
-@@ -278,7 +330,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+@@ -280,7 +332,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
                  wr32(hcca + HCCA_DONE_HEAD, 0);
              hc->reg[HcDoneHead / 4] = 0;
          }
@@ -12069,7 +12043,7 @@ index d45d8bb..01cbde9 100644
          hc->ack_seq++;
          return;
  
-@@ -349,7 +401,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
+@@ -351,7 +403,7 @@ static void ohci_write(void *dev, uint32_t off, uint64_t val, int size)
              if (*ps & PORT_CCS)
                  *ps |= PORT_PES;
              *ps |= PORT_PRSC;
@@ -12078,7 +12052,7 @@ index d45d8bb..01cbde9 100644
          }
          return;
      }
-@@ -506,11 +558,37 @@ static int guest_ok(uint32_t va, uint32_t bytes)
+@@ -508,11 +560,37 @@ static int guest_ok(uint32_t va, uint32_t bytes)
   * never hands out contiguous memory that overlaps the image, so an address
   * inside it is the image. Sending that one to the window delivered the
   * descriptor where the driver never looked, and it reset the port and asked
@@ -12118,7 +12092,7 @@ index d45d8bb..01cbde9 100644
      if (addr && addr < xbox_ContiguousAllocatedBytes())
          return OHCI_CONTIG_BASE + addr;
      return addr;
-@@ -537,6 +615,23 @@ static uint8_t *guest_ptr(uint32_t va, uint32_t bytes)
+@@ -539,6 +617,23 @@ static uint8_t *guest_ptr(uint32_t va, uint32_t bytes)
           ? (uint8_t *)xbox_GetMemoryOffset() + va : NULL;
  }
  
@@ -12142,10 +12116,45 @@ index d45d8bb..01cbde9 100644
  /* Transfer counts for RECOMP_USB_STATS: input reports served, control
   * transfer stages, and OUT packets (rumble) by endpoint. */
  static unsigned long s_n_report, s_n_ctrl, s_n_out_ep0, s_n_out_other;
-@@ -649,11 +744,45 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
-          * control request's stages broke that request; Burnout 3 starts its
-          * engine-rev rumble on the Crash countdown and then paused with the
-          * pad unresponsive. */
+@@ -644,40 +739,56 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
+             moved = n;
+         }
+     } else {
+-        /* OUT: the status stage of an IN control transfer, or rumble. Only
+-         * the control pipe's ends a control transfer. A rumble packet on
+-         * endpoint 2 used to clear the pending setup too, so a force-feedback
+-         * write landing between a control request's stages broke that
+-         * request; Burnout 3 starts its engine-rev rumble on the Crash
+-         * countdown and then paused with the pad unresponsive. */
+-        moved = len;
+-        /* Rumble: an XID output report -- 00 06, left motor, right motor
+-         * (16-bit each) -- on the interrupt OUT endpoint, or as the data of
+-         * a SET_REPORT (21 09) on the control pipe. Forwarded to the host
+-         * pad; RECOMP_RUMBLE=0 ignores it. */
+-        if (len >= 6 && guest_ptr(cbp, 6u)
+-            && (endpoint != 0 || (g_setup_pending && g_setup.bmRequestType == 0x21
+-                                  && g_setup.bRequest == 0x09))) {
+-            static int rumble = -1;
+-            const uint8_t *r = (const uint8_t *)guest_ptr(cbp, 6u);
+-            if (rumble < 0) {
+-                const char *e = getenv("RECOMP_RUMBLE");
+-                rumble = !(e && *e == '0');
+-            }
+-            if (rumble && r[0] == 0x00 && r[1] >= 6) {
+-                XBOX_VIBRATION v;
+-                v.wLeftMotorSpeed  = (WORD)(r[2] | r[3] << 8);
+-                v.wRightMotorSpeed = (WORD)(r[4] | r[5] << 8);
+-                if (s_trace)
+-                    fprintf(stderr, "  [OHCI%d] rumble pad %d left %u right %u (ep %u)\n",
+-                            hc->index, pad, v.wLeftMotorSpeed, v.wRightMotorSpeed, endpoint);
+-                xbox_InputSetState((DWORD)pad, &v);
++        /* OUT: the status stage of an IN control transfer, or rumble. Both
++         * are accepted and discarded -- but only the control pipe's ends a
++         * control transfer. A rumble packet on endpoint 2 used to clear the
++         * pending setup too, so a force-feedback write landing between a
++         * control request's stages broke that request; Burnout 3 starts its
++         * engine-rev rumble on the Crash countdown and then paused with the
++         * pad unresponsive. */
 +        /* Rumble arrives either way: the 6-byte output report on interrupt
 +         * endpoint 2, or as the data stage of a SET_REPORT (21 09) on the
 +         * control pipe. The pad model passes it on to the host pad. */
@@ -12173,9 +12182,13 @@ index d45d8bb..01cbde9 100644
 +                        ram ? ram[0] : 0xEE, ram ? ram[1] : 0xEE,
 +                        win ? win[0] : 0xEE, win ? win[1] : 0xEE);
 +                fflush(stderr);
-+            }
-+        }
-         moved = len;
+             }
+         }
++        moved = len;
++        /* Upstream v0.16.0 forwards rumble here with xbox_InputSetState;
++         * usb_gamepad_output below already does (RAM-number aware, unchanged
++         * speeds skipped, motors stopped at exit, RECOMP_RUMBLE=0 honoured),
++         * so that copy is left out rather than sending every report twice. */
          if (endpoint == 0) {
 +            if (data && g_setup_pending && g_setup.bmRequestType == 0x21
 +                && g_setup.bRequest == 0x09)
@@ -12188,7 +12201,7 @@ index d45d8bb..01cbde9 100644
              s_n_out_other++;
          }
      }
-@@ -703,7 +832,24 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+@@ -727,7 +838,24 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
                  fflush(stderr);
              }
          }
@@ -12213,7 +12226,7 @@ index d45d8bb..01cbde9 100644
          if (head & ED_HEAD_HALT) { ed = rd32(ed + 12) & ED_PTR_MASK; continue; }
  
          while ((head & ED_PTR_MASK) != tail
-@@ -716,6 +862,7 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
+@@ -740,6 +868,7 @@ static int ohci_walk_eds(OhciController *hc, uint32_t ed, uint32_t *done_head)
               * descriptor on the done queue, newest first. */
              wr32(td, (rd32(td) & 0x0FFFFFFFu) | (cc << 28));
              wr32(td + 8, *done_head);
@@ -12221,7 +12234,7 @@ index d45d8bb..01cbde9 100644
              *done_head = td;
              completed++;
  
-@@ -737,10 +884,49 @@ static void ohci_publish_done(OhciController *hc, uint32_t done_head)
+@@ -761,10 +890,49 @@ static void ohci_publish_done(OhciController *hc, uint32_t done_head)
  {
      uint32_t hcca = hc->reg[HcHCCA / 4];
  
@@ -12272,7 +12285,7 @@ index d45d8bb..01cbde9 100644
  }
  
  /* Both runners add to the caller's done queue rather than publishing their
-@@ -924,12 +1110,16 @@ static void ohci_raise(OhciController *hc, uint32_t source)
+@@ -964,12 +1132,16 @@ static void ohci_raise(OhciController *hc, uint32_t source)
      uint32_t enable = hc->reg[HcInterruptEnable / 4];
      int claimed;
  
@@ -12290,8 +12303,8 @@ index d45d8bb..01cbde9 100644
      if (s_trace || claimed >= 0) {
          static unsigned n;
          if (n++ < 20) {
-@@ -1071,7 +1261,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
-             unsigned port = pspec ? (unsigned)atoi(pspec) : 0u;
+@@ -1112,7 +1284,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+             unsigned port = pspec ? (unsigned)atoi(pspec) : (s_ndp >= 4 ? 2u : 0u);
              if (port >= s_ndp) port = s_ndp - 1u;
              hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
 -            hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
@@ -12299,7 +12312,7 @@ index d45d8bb..01cbde9 100644
              plugged = 1;
              s_plugged_pads = 1;
              first_port = port;
-@@ -1089,7 +1279,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1130,7 +1302,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              if (++settle > 50) {                 /* ~1 s after the last */
                  unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
                  hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
@@ -12308,7 +12321,7 @@ index d45d8bb..01cbde9 100644
                  fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
                          s_plugged_pads + 1, port + 1, 10);
                  fflush(stderr);
-@@ -1121,7 +1311,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1162,7 +1334,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
               * controller zeroes, so a dword write is what hardware does. */
              if (hcca)
                  wr32(hcca + 0x80, hc->reg[HcFmNumber / 4]);
@@ -12317,7 +12330,7 @@ index d45d8bb..01cbde9 100644
          }
  
          /* Be the bus master. ControlListEnable in HcControl says the driver
-@@ -1163,13 +1353,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1204,13 +1376,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
           && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
              if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
                                &pass_done))
@@ -12429,7 +12442,7 @@ index 18291d7..f447290 100644
   * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
 diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
-index 4e86a08..8b2fee2 100644
+index 331d2e2..ce3fdbe 100644
 --- a/src/video/CMakeLists.txt
 +++ b/src/video/CMakeLists.txt
 @@ -3,6 +3,7 @@ add_library(xbox_video STATIC
@@ -12441,10 +12454,10 @@ index 4e86a08..8b2fee2 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index b26edfe..9d6170b 100644
+index 3430107..913b9d0 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -7,20 +7,84 @@
+@@ -7,28 +7,84 @@
   * implemented, none of it is observable. This is the other half: a window that
   * reads that memory and puts it on screen.
   *
@@ -12452,13 +12465,20 @@ index b26edfe..9d6170b 100644
 - * whatever the guest actually wrote, so the fewer stages between guest memory
 - * and the screen the better -- and it must keep working while the D3D8 layer
 - * is busy with something else, such as the FMV player's own window.
+- * RECOMP_D3D_PRESENT=1 shows the same frames through a D3D11 swap chain of
+- * the window's own instead (gpu_present.c): scaled on the GPU, vsync-paced.
 + * Not through the D3D8 layer. The point is to display whatever the guest
 + * actually wrote, so the fewer stages between guest memory and the screen the
 + * better -- and it must keep working while the D3D8 layer is busy with
 + * something else, such as the FMV player's own window. The finished frame is
 + * shown with a D3D11 flip-model swapchain of this window's own (vsync, scaled
 + * with a choice of filter), or with plain GDI where that cannot be had.
-+ *
+  *
+- * The window opens at RECOMP_WINDOW_SCALE times the frame (default 2, made
+- * smaller until it fits the desktop) and can be resized; the frame is
+- * letterboxed to its 4:3 shape. F11 or Alt+Enter toggles borderless
+- * fullscreen, RECOMP_FULLSCREEN=1 starts in it. Closing the window ends the
+- * process, as the SDL window does.
 + * Settings, each an environment variable or a key in the [display] section
 + * of <app>.ini (the variable wins). The ini is looked for at RECOMP_INI, then
 + * in the working directory, then beside the exe; <app> is RECOMP_APP_NAME,
@@ -12533,7 +12553,16 @@ index b26edfe..9d6170b 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -34,6 +98,12 @@
+@@ -38,15 +94,17 @@
+  * is the thing that receives the keys, so that is what has to remember
+  * them. */
+ #include "keyboard.h"   /* src/input */
+-#include "gpu_present.h"
+ #include "recomp_exit_hook.h"   /* src/platform */
+-#include <stdbool.h>
+-#include "pvideo_scanout.h"
+-#include "../nv2a/nv2a_mmio_hook.h"
+ 
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
  static volatile LONG s_fb_running;
@@ -12546,10 +12575,72 @@ index b26edfe..9d6170b 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -51,6 +121,54 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -64,68 +122,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
+-/* The last PVIDEO frame shown. A frame stays on screen until the next one or
+- * STOP, but once its bank is consumed the title may reuse the memory, so the
+- * pixels are kept here rather than read again. */
+-static uint8_t      *s_pvideo_source;
+-static size_t        s_pvideo_bytes;
+-static unsigned      s_pvideo_bank;
+-static uint32_t      s_pvideo_regs[0x1000 / 4];
+-
+-/* Draw the video overlay over s_rgb: a newly submitted bank if there is one
+- * (copied, drawn, then handed back to the title), else the last frame. */
+-static void fb_overlay(void)
+-{
+-    uint32_t regs[0x1000 / 4];
+-    unsigned bank;
+-    bool presented = false;
+-
+-    if (!s_rgb || !nv2a_hook_pvideo_snapshot(regs)) return;
+-    if ((regs[NV_PVIDEO_STOP / 4] & 1u) ||
+-        (s_pvideo_source &&
+-         regs[(NV_PVIDEO_SIZE_IN + s_pvideo_bank * 4) / 4] == UINT32_MAX)) {
+-        free(s_pvideo_source);
+-        s_pvideo_source = NULL;
+-        if (regs[NV_PVIDEO_STOP / 4] & 1u) return;
+-    }
+-    for (bank = 0; bank < 2; ++bank) {
+-        uint64_t physical = (uint64_t)regs[(NV_PVIDEO_BASE + bank * 4) / 4] +
+-                            regs[(NV_PVIDEO_OFFSET + bank * 4) / 4];
+-        unsigned pitch = regs[(NV_PVIDEO_FORMAT + bank * 4) / 4] & NV_PVIDEO_FORMAT_PITCH;
+-        unsigned height = (regs[(NV_PVIDEO_SIZE_IN + bank * 4) / 4] >> 16) & 0x7ff;
+-        uint64_t bytes = (uint64_t)pitch * height;
+-        uintptr_t va;
+-        MEMORY_BASIC_INFORMATION mapping;
+-        uint8_t *snapshot;
+-
+-        if (!(regs[NV_PVIDEO_BUFFER / 4] & (1u << (bank * 4u)))) continue;
+-        if (!bytes || physical + bytes > 0x04000000u) continue;
+-        va = (uintptr_t)(0x80000000u + (uint32_t)physical) +
+-             (uintptr_t)xbox_GetMemoryOffset();
+-        if (!VirtualQuery((const void *)va, &mapping, sizeof(mapping)) ||
+-            mapping.State != MEM_COMMIT ||
+-            (mapping.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+-            bytes > mapping.RegionSize - (size_t)(va - (uintptr_t)mapping.BaseAddress))
+-            continue;
+-        snapshot = (uint8_t *)malloc((size_t)bytes);
+-        if (!snapshot) continue;
+-        memcpy(snapshot, (const void *)va, (size_t)bytes);
+-        if (!pvideo_scanout(regs, snapshot, (size_t)bytes, s_rgb,
+-                            s_fb_width, s_fb_height, bank)) {
+-            free(snapshot);
+-            continue;
+-        }
+-        free(s_pvideo_source);
+-        s_pvideo_source = snapshot;
+-        s_pvideo_bytes = (size_t)bytes;
+-        s_pvideo_bank = bank;
+-        memcpy(s_pvideo_regs, regs, sizeof(s_pvideo_regs));
+-        presented = true;
+-        nv2a_hook_pvideo_consume(bank);
+-    }
+-    if (!presented && s_pvideo_source)
+-        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
+-                       s_fb_width, s_fb_height, s_pvideo_bank);
 +/* The GPU back end's image of the same frame, when it drew one: a texture
 + * shared from its device (nv2a_gpu_d3d11.cpp, present_to_window), larger than
 + * the guest frame at a render scale above 1. s_gpu_mark is raised by the back
@@ -12596,12 +12687,10 @@ index b26edfe..9d6170b 100644
 +    *width = s_fb_width;
 +    *height = s_fb_height;
 +    return 1;
-+}
-+
+ }
+ 
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
- {
-     /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -120,6 +238,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -197,6 +239,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -12609,10 +12698,14 @@ index b26edfe..9d6170b 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -145,16 +264,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -222,68 +265,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
+-/* Alt+Enter / F11: borderless fullscreen on the window's monitor, and back.
+- * (DXGI's own Alt+Enter, exclusive mode at the frame's 640x480, is off --
+- * gpu_present.c; both presenters letterbox to any size.) */
+-static void fb_toggle_fullscreen(HWND h)
 +/* ---- settings ----------------------------------------------------------- */
 +
 +enum { FILTER_NEAREST, FILTER_BILINEAR, FILTER_SHARP };
@@ -12658,7 +12751,14 @@ index b26edfe..9d6170b 100644
 + * when the title was told the TV is widescreen (it then draws anamorphic,
 + * squeezed into the same frame, as for a TV that stretches it). */
 +static int display_width(void)
-+{
+ {
+-    static int full;
+-    static RECT saved;
+-    static LONG_PTR saved_style;
+-    if (!full) {
+-        MONITORINFO mi;
+-        mi.cbSize = sizeof mi;
+-        if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi))
 +    return s_cfg.widescreen ? (int)((s_fb_height * 16 + 4) / 9) : (int)s_fb_width;
 +}
 +
@@ -12893,31 +12993,65 @@ index b26edfe..9d6170b 100644
 +        if (!GetWindowPlacement(h, &wp)
 +            || !GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY),
 +                                &mi))
-+            return;
+             return;
+-        GetWindowRect(h, &saved);
+-        saved_style = GetWindowLongPtrA(h, GWL_STYLE);
+-        SetWindowLongPtrA(h, GWL_STYLE, (saved_style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
 +        SetWindowLongPtrA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+         SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+-                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+-        full = 1;
 +                     mi.rcMonitor.right - mi.rcMonitor.left,
 +                     mi.rcMonitor.bottom - mi.rcMonitor.top,
 +                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 +        s_is_fullscreen = 1;
-+    } else {
+     } else {
+-        SetWindowLongPtrA(h, GWL_STYLE, saved_style);
+-        SetWindowPos(h, NULL, saved.left, saved.top, saved.right - saved.left,
+-                     saved.bottom - saved.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
+-        full = 0;
 +        SetWindowLongPtrA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
 +        SetWindowPlacement(h, &wp);
 +        SetWindowPos(h, NULL, 0, 0, 0, 0,
 +                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
 +                     | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 +        s_is_fullscreen = 0;
-+    }
+     }
 +    InterlockedExchange(&s_resized, 1);
-+}
-+
+ }
+ 
  static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  {
+-    /* First press only (bit 30: the key was already down), and with Alt held
+-     * (bit 29) for Enter; neither reaches the key table. */
+-    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
+-        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
+-        fb_toggle_fullscreen(h);
+-        return 0;
+-    }
+-    if (m == WM_SYSKEYDOWN && w == VK_RETURN)
+-        return 0;                       /* auto-repeat of Alt+Enter */
      switch (m) {
      case WM_CLOSE:
      case WM_DESTROY:
+-        /* Closing the window ends the run. Only stopping this thread left
+-         * every other one running -- audio played on, and the process had
+-         * to be ended from Task Manager. The guest has no exit path of its
+-         * own to ask. TerminateProcess rather than ExitProcess: the guest
+-         * threads are still running, and ExitProcess's cleanup can wait on
+-         * a lock one of them held. The exit hook does the reporting that
+-         * would otherwise be skipped. RECOMP_CLOSE_KEEPS_RUNNING=1 only
+-         * closes the window, as before. */
 +        InterlockedExchange(&s_fb_closed, 1);
          InterlockedExchange(&s_fb_running, 0);
+-        if (!getenv("RECOMP_CLOSE_KEEPS_RUNNING")) {
+-            fprintf(stderr, "  [FBWIN] window closed: exiting\n");
+-            recomp_exit_hook_run("window");
+-            fflush(stdout);
+-            fflush(stderr);
+-            TerminateProcess(GetCurrentProcess(), 0);
+-        }
          return 0;
  
 +    case WM_SIZE:
@@ -12953,9 +13087,29 @@ index b26edfe..9d6170b 100644
 +            return 0;
 +        }
          xbox_InputKeySet((int)w, 1);
-         /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
-          *
-@@ -183,6 +631,17 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+         /* A Shift, Ctrl or Alt is also its side's key, for bindings to
+          * "lshift" and the like; wParam stays the either-side one. */
+@@ -329,11 +649,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+ 
+     /* Mouse buttons go in the same table, for bindings that name them.
+      * Capturing the mouse while one is down delivers its release even
+-     * outside the window. */
++     * outside the window. With the settings overlay or the launcher up, a
++     * left or right click works the menus instead (WM_MOUSEMOVE below). */
+     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+     case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+     case WM_MBUTTONDOWN: case WM_MBUTTONUP:
+     case WM_XBUTTONDOWN: case WM_XBUTTONUP:
++        if ((s_ov_open || s_launcher)
++            && (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN)) {
++            ov_mouse(h, (short)LOWORD(l), (short)HIWORD(l),
++                     m == WM_LBUTTONDOWN ? 1 : -1);
++            return 0;
++        }
+         {
+             int down = 0;
+             int vk = xbox_InputWin32MouseVk(m, (uint32_t)w, &down);
+@@ -350,6 +677,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -12964,19 +13118,19 @@ index b26edfe..9d6170b 100644
 +     * it (right-click changes it the other way). This thread is the window
 +     * thread, which owns the menu state. */
 +    case WM_MOUSEMOVE:
-+    case WM_LBUTTONDOWN:
-+    case WM_RBUTTONDOWN:
 +        if (s_ov_open || s_launcher)
-+            ov_mouse(h, (short)LOWORD(l), (short)HIWORD(l),
-+                     m == WM_LBUTTONDOWN ? 1 : m == WM_RBUTTONDOWN ? -1 : 0);
++            ov_mouse(h, (short)LOWORD(l), (short)HIWORD(l), 0);
 +        return 0;
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -268,15 +727,2094 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -435,41 +770,2077 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
+-/* GDI: the frame letterboxed into the client area, like the D3D11
+- * presenter; the borders are cleared when the size changes. */
+-static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 +/* ---- settings overlay --------------------------------------------------- */
 +
 +/* F10, or Back+Start on the pad, opens a menu over the game: the display
@@ -13648,10 +13802,19 @@ index b26edfe..9d6170b 100644
 +
 +/* Draw art into a box, as large as fits with its shape kept, centred. */
 +static void art_draw(const Art *art, const RECT *box)
-+{
+ {
+-    static LONG lw, lh;
+-    RECT c;
+-    LONG cw, ch, w, h;
+-    GetClientRect(hwnd, &c);
+-    cw = c.right - c.left; ch = c.bottom - c.top;
+-    if (cw <= 0 || ch <= 0)
 +    int bw = box->right - box->left, bh = box->bottom - box->top, dw, dh;
 +    if (!art->dc || bw < 1 || bh < 1)
-+        return;
+         return;
+-    if (cw != lw || ch != lh) {
+-        FillRect(hdc, &c, (HBRUSH)GetStockObject(BLACK_BRUSH));
+-        lw = cw; lh = ch;
 +    dw = bw;
 +    dh = (int)((long long)art->h * bw / art->w);
 +    if (dh > bh) {
@@ -13785,7 +13948,9 @@ index b26edfe..9d6170b 100644
 +        fh = by_h < by_w ? by_h : by_w;
 +        if (fh > 22) fh = 22;
 +        if (fh < 10) fh = 10;
-+    }
+     }
+-    if ((long long)cw * s_fb_height <= (long long)ch * s_fb_width) {
+-        w = cw; h = (LONG)((long long)cw * s_fb_height / s_fb_width);
 +    font = ui_font(fh, FW_NORMAL);
 +    bold = ui_font(fh * 5 / 4, FW_BOLD);
 +    oldf = (HFONT)SelectObject(s_ov.dc, font);
@@ -14544,7 +14709,8 @@ index b26edfe..9d6170b 100644
 +        for (l = 1; l < FG_LEVELS; l++)
 +            fg_pass(fg.ps_lumd, fg.slot[i].lrtv[l], fg.lw[l], fg.lh[l],
 +                    NULL, NULL, NULL, fg.slot[i].lsrv[l - 1], NULL, 0, 0, 0);
-+    } else {
+     } else {
+-        h = ch; w = (LONG)((long long)ch * s_fb_width / s_fb_height);
 +        fg.slot[i].seq = -seq;       /* no luma: not for motion */
 +    }
 +}
@@ -14896,7 +15062,11 @@ index b26edfe..9d6170b 100644
 +            srv = made;
 +            s_fg_shown = 1;
 +        }
-+    }
+     }
+-    SetStretchBltMode(hdc, HALFTONE);
+-    SetBrushOrgEx(hdc, 0, 0, NULL);     /* HALFTONE wants it after the mode */
+-    StretchDIBits(hdc, (cw - w) / 2, (ch - h) / 2, w, h,
+-                  0, 0, (int)s_fb_width, (int)s_fb_height,
 +    src_w = gpu ? (float)d3d.g_w : (float)s_fb_width;
 +    src_h = gpu ? (float)d3d.g_h : (float)s_fb_height;
 +
@@ -15015,7 +15185,7 @@ index b26edfe..9d6170b 100644
 +                                                         : HALFTONE);
 +    SetBrushOrgEx(hdc, 0, 0, NULL);
 +    StretchDIBits(hdc, x, y, w, h, 0, 0, (int)s_fb_width, (int)s_fb_height,
-+                  s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
+                   s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
 +    /* The overlay's boxes, opaque: GDI has no per-pixel blend worth it. */
 +    if (ov_visible()) {
 +        int k;
@@ -15026,11 +15196,18 @@ index b26edfe..9d6170b 100644
 +                   s_ov.dc, r->left, r->top, SRCCOPY);
 +        }
 +    }
-+}
-+
+ }
+ 
+-/* The converted frame in s_rgb, on screen: D3D11 when it is up (which waits
+- * for vsync, so returns 1 when the loop is already paced), else GDI. */
+-static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 +/* F12: the frame on screen, at the console's resolution. */
 +static void take_screenshot(void)
-+{
+ {
+-    if (gpu_present_active())
+-        return gpu_present_frame(s_rgb);
+-    gdi_blit(hwnd, hdc, bi);
+-    return 0;
 +    char path[MAX_PATH];
 +    SYSTEMTIME t;
 +
@@ -15048,14 +15225,15 @@ index b26edfe..9d6170b 100644
 +        snprintf(s_notice, sizeof s_notice, "Screenshot saved: %s", path);
 +    }
 +    s_notice_until = GetTickCount() + 3000;
-+}
-+
+ }
+ 
  static DWORD WINAPI fb_thread(LPVOID unused)
- {
+@@ -477,11 +2848,16 @@ static DWORD WINAPI fb_thread(LPVOID unused)
      HWND hwnd;
      HDC hdc;
      BITMAPINFO bi;
 -    RECT r;
+-    int fb_pinned;
 +    RECT r, wa;
 +    int use_d3d;
 +    LONG last_flips = -1;
@@ -15069,38 +15247,75 @@ index b26edfe..9d6170b 100644
      {
          WNDCLASSA wc;
          memset(&wc, 0, sizeof(wc));
-@@ -286,9 +2824,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -491,43 +2867,31 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
--    r.left = 0; r.top = 0; r.right = (LONG)s_fb_width; r.bottom = (LONG)s_fb_height;
--    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
--    hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
 +    /* window_scale times the frame, shrunk by whole steps to fit the work
 +     * area so the title bar stays on screen. */
-+    {
+     {
+-        /* RECOMP_WINDOW_SCALE (1-8, default 2, as in the SDL window): the
+-         * client area is the frame times this, made smaller until the window
+-         * fits the desktop work area, and centred on it. */
+-        const char *e = getenv("RECOMP_WINDOW_SCALE");
+-        int scale = e ? atoi(e) : 2;
+-        RECT work;
+-        if (scale < 1 || scale > 8)
+-            scale = 2;
+-        if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
+-            work.left = work.top = 0; work.right = 1920; work.bottom = 1080;
+-        }
+-        for (;; scale--) {
 +        int k = s_cfg.window_scale;
 +        SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
 +        for (;;) {
-+            r.left = 0; r.top = 0;
+             r.left = 0; r.top = 0;
+-            r.right = (LONG)s_fb_width * scale; r.bottom = (LONG)s_fb_height * scale;
 +            r.right = (LONG)display_width() * k; r.bottom = (LONG)s_fb_height * k;
-+            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+             AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+-            if (scale <= 1 || (r.right - r.left <= work.right - work.left
+-                               && r.bottom - r.top <= work.bottom - work.top))
 +            if (k == 1 || (r.right - r.left <= wa.right - wa.left
 +                           && r.bottom - r.top <= wa.bottom - wa.top))
-+                break;
+                 break;
 +            k--;
-+        }
-+    }
+         }
+-        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
+-                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+-                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
+-                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
+-                               r.right - r.left, r.bottom - r.top,
+-                               NULL, NULL, GetModuleHandleA(NULL), NULL);
+     }
 +    hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", s_cfg.title,
-                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                            CW_USEDEFAULT, CW_USEDEFAULT,
-                            r.right - r.left, r.bottom - r.top,
-@@ -309,36 +2860,101 @@ static DWORD WINAPI fb_thread(LPVOID unused)
++                           WS_OVERLAPPEDWINDOW | WS_VISIBLE,
++                           CW_USEDEFAULT, CW_USEDEFAULT,
++                           r.right - r.left, r.bottom - r.top,
++                           NULL, NULL, GetModuleHandleA(NULL), NULL);
+     if (!hwnd) {
+         InterlockedExchange(&s_fb_running, 0);
+         return 0;
+     }
+     hdc = GetDC(hwnd);
+-    {
+-        const char *fs = getenv("RECOMP_FULLSCREEN");
+-        if (fs && *fs && *fs != '0')
+-            fb_toggle_fullscreen(hwnd);
+-    }
+ 
+     memset(&bi, 0, sizeof(bi));
+     bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
+@@ -538,42 +2902,102 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     bi.bmiHeader.biCompression = BI_RGB;
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
+-    /* A window pinned to one address shows that memory and nothing else. */
+-    fb_pinned = getenv("RECOMP_FB_VA") != NULL;
  
 -    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
 -            s_fb_width, s_fb_height);
+-    if (gpu_present_enabled())
+-        gpu_present_init(hwnd, s_fb_width, s_fb_height);
 +    use_d3d = !s_cfg.gdi && d3d_init(hwnd);
 +    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u, %s%s)\n",
 +            s_fb_width, s_fb_height,
@@ -15113,6 +15328,7 @@ index b26edfe..9d6170b 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
+-        int paced = 0;
 +        int have = 0, fresh, resized, fg_on;
          while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
              TranslateMessage(&msg);
@@ -15144,9 +15360,9 @@ index b26edfe..9d6170b 100644
              if (s_present[idx])
                  memcpy(s_rgb, s_present[idx],
                         (size_t)s_fb_width * s_fb_height * 4);
--            StretchDIBits(hdc, 0, 0, (int)s_fb_width, (int)s_fb_height,
--                          0, 0, (int)s_fb_width, (int)s_fb_height,
--                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
+-            if (!fb_pinned)
+-                fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi);
 +            have = 1;
          } else if (s_fb_va && s_fb_pitch && s_rgb) {
              /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
@@ -15154,9 +15370,9 @@ index b26edfe..9d6170b 100644
              const uint8_t *src =
                  (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
              fb_convert(src, s_fb_pitch / s_fb_width);
--            StretchDIBits(hdc, 0, 0, (int)s_fb_width, (int)s_fb_height,
--                          0, 0, (int)s_fb_width, (int)s_fb_height,
--                          s_rgb, &bi, DIB_RGB_COLORS, SRCCOPY);
+-            if (!fb_pinned)
+-                fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi);
 +            have = 1;
 +        } else if (s_launcher_used && s_rgb) {
 +            /* The launcher, or black from Play until the title's first
@@ -15207,7 +15423,7 @@ index b26edfe..9d6170b 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -349,41 +2965,93 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -584,45 +3008,94 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -15292,9 +15508,11 @@ index b26edfe..9d6170b 100644
 +                SetWindowTextA(hwnd, s_notice);
              }
          }
--        Sleep(16);
+-        if (!paced)
+-            Sleep(16);                  /* D3D11's Present waited for vsync */
      }
  
+-    gpu_present_shutdown();
 +    if (use_d3d) {
 +        if (s_is_fullscreen)
 +            toggle_fullscreen(hwnd);
@@ -15305,19 +15523,22 @@ index b26edfe..9d6170b 100644
      DestroyWindow(hwnd);
      free(s_rgb);
      s_rgb = NULL;
+-    free(s_pvideo_source);
+-    s_pvideo_source = NULL;
 +    if (s_fb_closed) {
 +        /* Not exit(): its static destructors free the GPU back end's caches
 +         * while the pushbuffer walker is still drawing with them (a read of
 +         * a freed texture list in get_texture, glow2). The logs are flushed;
 +         * nothing else needs tearing down. */
 +        fprintf(stderr, "  [FBWIN] window closed: exiting\n");
++        recomp_exit_hook_run("window");   /* the kernel's exit reports */
 +        fflush(NULL);
 +        TerminateProcess(GetCurrentProcess(), 0);
 +    }
      return 0;
  }
  
-@@ -391,7 +3059,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -630,7 +3103,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -15326,7 +15547,7 @@ index b26edfe..9d6170b 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -402,4 +3070,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -641,4 +3114,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
