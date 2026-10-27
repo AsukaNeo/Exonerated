@@ -4,7 +4,7 @@ Reusable helper scripts. Run them from `deathrow/` (`py -3 tools/<name>.py ...`)
 
 | Script | What it does |
 |---|---|
-| `stub_trace.py` | Adds a `[STUB]` print to every unresolved stub in the generated code. `regen.sh` runs it. |
+| `stub_trace.py` | Adds a `[STUB]` print to every unresolved stub in the generated code. `regen.sh` and `build.bat` run it. |
 | `fnx.py` | Prints the generated C around guest addresses: `py -3 tools/fnx.py 0x00248397 > fnx.txt` |
 | `sym.py` | Resolves exe RVAs (`rip rva`, `[WATCH]` lines) to functions through the link map: `py -3 tools/sym.py < run.log` |
 | `sym_chain.py` | Resolves the sampling profiler's `[SAMPLE]` chains the same way. |
@@ -13,4 +13,5 @@ Reusable helper scripts. Run them from `deathrow/` (`py -3 tools/<name>.py ...`)
 | `make_manifest.py` | Writes `.recomp.json` (title, title ID, region, version) from the XBE. |
 | `strip_wrappers.py` | Deletes the named `sub_XXXXXXXX` overrides from `src/recomp_manual.c`. |
 
-Applied one-shot patch scripts from bring-up are in `../patches/scripts/`.
+The old one-off patch scripts from bring-up are in the git history; see
+[patches/README.md](../patches/README.md).

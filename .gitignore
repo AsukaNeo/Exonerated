@@ -1,22 +1,31 @@
-# derived from the game: never commit
+# Anything that comes from the game stays out of the repo.
 src/recomp/gen/
+game/
 game_files/
-texdump/
 *.xbe
 *.iso
-*.bmp
-*.png
-*.jpg
 *.wav
-*.log
-prof*.txt
-prof.tmp
-# build output
+*.bmp
+*.jpg
+*.png
+!assets/
+!assets/*.png
+screenshots/
+texdump*/
+
+# Builds and release zips
 build/
-# release builds and their zips (tools/make_release.py)
 build-release/
 dist/
-# local backups
+
+# Logs and scratch output from runs
+logs/
+*.log
+*.stderr
+prof*.txt
+prof.tmp
+
+# Local backups made by the patch scripts
 *.pre_*
 *.bak*
 *.broken
@@ -24,17 +33,8 @@ dist/
 *.cur
 *.refl_bad
 *.ff1
-# project art is allowed
-!assets/
-!assets/*.png
-# F12 captures from the game window (game-derived)
-screenshots/
 
-# build.bat: your game files (game/), its logs, and the launcher it writes
-game/
-build.log
-build-configure.log
+# Things build.bat and the game write on a player's machine
 Play Exonerated.bat
-exonerated.log
-# your settings, written by the settings overlay (F10)
 exonerated.ini
+saves/
