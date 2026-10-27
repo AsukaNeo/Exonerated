@@ -663,5 +663,140 @@
   "start": "0x0014F800",
   "observed": true,
   "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00033A40",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime (Conquest menus, cq1.log); decodes as a function body."
+ },
+ {
+  "start": "0x00016110",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00020010",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00020020",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00020040",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00020060",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x000256D0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040030",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040270",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040300",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040330",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040360",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040A90",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00040AA0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00041D90",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00041E20",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00053A40",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x0006BBD0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00080070",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x000800E0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x000800F0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x00100050",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x001000C0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x001000D0",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x0016E180",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x0016E190",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
+ },
+ {
+  "start": "0x0016E200",
+  "observed": false,
+  "note": "Virtual method: listed in a vtable in .rdata/.data but missed by the disassembler (Conquest menus called 0x33A40 and 0x53A40)."
  }
 ]
