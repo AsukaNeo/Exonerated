@@ -73,8 +73,12 @@ What the player sees: with no game found, the program asks for the disc
 image or `default.xbe` (or you can drop one onto the exe). It checks the
 game before copying anything, unpacks a disc image into `game.partial`, and
 renames it to `game` once it's complete. Saves live in a `saves` folder next
-to the exe so the whole thing is portable. The big partition images and
-caches go in `%LOCALAPPDATA%\Exonerated`.
+to the exe, and the big partition images and caches in a `data` folder
+beside it, so the whole thing is portable and nothing is written outside
+the folder. A release build also works in the exe's folder whatever the
+shortcut says. If that folder can't be written (Program Files), the data
+and saves fall back to `%LOCALAPPDATA%\Exonerated`, where versions up to
+0.9.5 kept them; saves found there are copied over once.
 
 ## The controller, under the hood
 

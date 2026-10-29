@@ -46,8 +46,11 @@ IF SOMETHING GOES WRONG
   - Saved games are kept in the "saves" folder here, so this whole folder
     is portable: copy it to another PC or drive and your game, settings and
     saves come along. For a new version, unzip it over this folder, or copy
-    "game", "saves" and exonerated.ini into the new one. (The Xbox's own
-    caches stay on each PC in %LOCALAPPDATA%\Exonerated and are rebuilt.)
+    "game", "saves" and exonerated.ini into the new one. The Xbox's own
+    caches go in the "data" folder here; it is safe to delete, the game
+    rebuilds it. Nothing is written outside this folder. (Versions up to
+    0.9.5 kept those caches in %LOCALAPPDATA%\Exonerated; once your saves
+    are in the "saves" folder you can delete that.)
   - To use a different copy of the game, delete the "game" folder (or the
     [game] lines in exonerated.ini) and start again.
 

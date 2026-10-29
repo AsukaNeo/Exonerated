@@ -250,46 +250,89 @@ static int dr_has_files(const char *dir)
     return any;
 }
 
-/* Saves in the download's own folder, so the folder is portable: the game,
- * the settings and the saves move together. A "saves" folder beside the exe
- * holds the title's E:\UDATA and E:\TDATA (RECOMP_SAVE_DIR, which moves just
- * those); the Xbox's partition images (5 GB, sparse) and caches, which the
- * game rebuilds on its own, stay in old_dir on this machine. [game] saves in
- * exonerated.ini names another folder (relative to the exe), and a
- * RECOMP_SAVE_DIR you set wins. Where the exe's folder can't be written
- * (Program Files), the saves stay in old_dir as before. Saves an earlier
- * version left in old_dir are copied over once. */
-static void dr_portable_saves(const char *old_dir)
+/* The folder [game] <key> in exonerated.ini names (relative to the exe, or
+ * absolute), def when it names none -- made if missing. 1 when it can be
+ * written to (a file can be dropped in it), else 0: the exe sits somewhere
+ * read-only such as Program Files. */
+static int dr_portable_dir(const char *key, const char *def, char *dir, size_t n)
 {
-    char exe_dir[MAX_PATH], ini[MAX_PATH], want[MAX_PATH], dir[MAX_PATH];
-    char probe[MAX_PATH], from[MAX_PATH], to[MAX_PATH], *slash;
-    static const char *const subs[] = { "UDATA", "TDATA" };
+    char exe_dir[MAX_PATH], ini[MAX_PATH], want[MAX_PATH], probe[MAX_PATH], *slash;
     HANDLE f;
-    size_t i;
 
-    if (getenv("RECOMP_SAVE_DIR") && *getenv("RECOMP_SAVE_DIR"))
-        return;
     GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
     if ((slash = strrchr(exe_dir, '\\')) != NULL)
         *slash = 0;
     snprintf(ini, sizeof ini, "%s\\exonerated.ini", exe_dir);
-    GetPrivateProfileStringA("game", "saves", "saves", want, sizeof want, ini);
+    GetPrivateProfileStringA("game", key, def, want, sizeof want, ini);
     if (want[0] == '\\' || (want[0] && want[1] == ':'))
-        snprintf(dir, sizeof dir, "%s", want);
+        snprintf(dir, n, "%s", want);
     else
-        snprintf(dir, sizeof dir, "%s\\%s", exe_dir, want);
+        snprintf(dir, n, "%s\\%s", exe_dir, want);
 
-    /* Writable? Make it and drop a file in it. */
     CreateDirectoryA(dir, NULL);
     snprintf(probe, sizeof probe, "%s\\.write-test", dir);
     f = CreateFileA(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                     FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
-    if (f == INVALID_HANDLE_VALUE) {
+    if (f == INVALID_HANDLE_VALUE)
+        return 0;
+    CloseHandle(f);
+    return 1;
+}
+
+/* The Xbox's partition images (5 GB, sparse), its cache partition and the
+ * T:/U: folders, in a "data" folder beside the exe, so nothing is left in
+ * %LOCALAPPDATA% and the whole download moves as one folder. All of it is
+ * safe to delete: the game rebuilds it. [game] data in exonerated.ini names
+ * another folder. Where the exe's folder can't be written, old_dir as before
+ * (returned). T:/U: content an earlier version left in old_dir is copied
+ * over once; its cache is not -- the game rebuilds that. */
+static const char *dr_portable_data(const char *old_dir)
+{
+    static char dir[MAX_PATH];
+    char from[MAX_PATH], to[MAX_PATH];
+    static const char *const subs[] = { "TitleData", "UserData" };
+    size_t i;
+
+    if (!dr_portable_dir("data", "data", dir, sizeof dir)) {
+        fprintf(stderr, "[BOOT] data: %s is not writable; using %s\n",
+                dir, old_dir ? old_dir : "the default folder");
+        return old_dir;
+    }
+    for (i = 0; old_dir && i < sizeof subs / sizeof subs[0]; i++) {
+        snprintf(from, sizeof from, "%s\\%s", old_dir, subs[i]);
+        snprintf(to, sizeof to, "%s\\%s", dir, subs[i]);
+        if (dr_has_files(from) && !dr_has_files(to)) {
+            dr_copy_tree(from, to);
+            fprintf(stderr, "[BOOT] data: copied %s to %s\n", from, to);
+        }
+    }
+    if (old_dir && GetFileAttributesA(old_dir) != INVALID_FILE_ATTRIBUTES)
+        fprintf(stderr, "[BOOT] data: %s is no longer used; it can be deleted "
+                "once your saves are in the saves folder\n", old_dir);
+    fprintf(stderr, "[BOOT] data: %s\n", dir);
+    return dir;
+}
+
+/* Saves in the download's own folder, so the folder is portable: the game,
+ * the settings and the saves move together. A "saves" folder beside the exe
+ * holds the title's E:\UDATA and E:\TDATA (RECOMP_SAVE_DIR, which moves just
+ * those). [game] saves in exonerated.ini names another folder (relative to
+ * the exe), and a RECOMP_SAVE_DIR you set wins. Where the exe's folder can't
+ * be written (Program Files), the saves stay in the data folder. Saves an
+ * earlier version left in old_dir are copied over once. */
+static void dr_portable_saves(const char *old_dir)
+{
+    char dir[MAX_PATH], from[MAX_PATH], to[MAX_PATH];
+    static const char *const subs[] = { "UDATA", "TDATA" };
+    size_t i;
+
+    if (getenv("RECOMP_SAVE_DIR") && *getenv("RECOMP_SAVE_DIR"))
+        return;
+    if (!dr_portable_dir("saves", "saves", dir, sizeof dir)) {
         fprintf(stderr, "[BOOT] saves: %s is not writable; keeping them in %s\n",
                 dir, old_dir ? old_dir : "the default folder");
         return;
     }
-    CloseHandle(f);
 
     for (i = 0; old_dir && i < sizeof subs / sizeof subs[0]; i++) {
         snprintf(from, sizeof from, "%s\\%s", old_dir, subs[i]);
@@ -618,6 +661,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
+#ifdef DR_RELEASE
+    /* Work in the exe's own folder whatever a shortcut's "Start in" says, so
+     * the files written relative to it (xbox_kernel.log, screenshots\,
+     * exonerated.ini) stay in the download's folder. A path the exe was
+     * opened with is made absolute first. */
+    {
+        static char opened[MAX_PATH];
+        char exe_dir[MAX_PATH], *slash;
+        if (__argc > 1 && GetFullPathNameA(__argv[1], MAX_PATH, opened, NULL))
+            __argv[1] = opened;
+        GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+        if ((slash = strrchr(exe_dir, '\\')) != NULL) {
+            *slash = 0;
+            SetCurrentDirectoryA(exe_dir);
+        }
+    }
+#endif
+
     printf("=== YOUR_GAME_NAME - Static Recompilation ===\n");
     printf("Loading XBE...\n");
 
@@ -728,16 +789,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
         const char *save_dir = NULL;
 #ifdef DR_RELEASE
-        /* The Xbox's partition images and caches under the game's own name,
-         * not the toolkit's shared %LOCALAPPDATA%\xboxrecomp; the saves
-         * themselves beside the exe (dr_portable_saves). */
-        static char release_save[MAX_PATH];
+        /* Everything beside the exe: the partition images and caches in
+         * data\ (dr_portable_data), the saves in saves\ (dr_portable_saves).
+         * %LOCALAPPDATA%\Exonerated, where earlier versions kept them, is
+         * only read to carry saves over -- and used when the exe's folder
+         * can't be written. */
+        static char old_dir[MAX_PATH];
         const char *local = getenv("LOCALAPPDATA");
-        if (local && *local) {
-            snprintf(release_save, sizeof release_save, "%s\\Exonerated", local);
-            save_dir = release_save;
-        }
-        dr_portable_saves(save_dir);
+        if (local && *local)
+            snprintf(old_dir, sizeof old_dir, "%s\\Exonerated", local);
+        save_dir = dr_portable_data(old_dir[0] ? old_dir : NULL);
+        dr_portable_saves(old_dir[0] ? old_dir : NULL);
 #endif
         xbox_path_init(YOUR_GAME_DIR, save_dir);
     }
