@@ -1,0 +1,14 @@
+; The settings menu's look, linked into the exe as RECOMP_THEME
+; (xboxrecomp src/video/fb_present.c, theme_load). Red and black,
+; after the Exonerated logo.
+accent  = #FF1E1E
+panel   = #0D0D10
+side    = #000000
+select  = #3C0C0E
+text    = #C8C8CE
+dim     = #80808A
+value   = #F2F2F4
+hot     = #FF5A46
+font    = Segoe UI
+heading = Bahnschrift
+caps    = 1

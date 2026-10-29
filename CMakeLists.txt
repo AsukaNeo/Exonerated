@@ -155,5 +155,14 @@ set(DR_TITLE_MARK "${CMAKE_CURRENT_SOURCE_DIR}/assets/asukaneo-mark.png")
 # The version the launcher shows (tools/make_release.py passes it).
 set(DR_VERSION "dev" CACHE STRING "Version shown on the launcher")
 target_compile_definitions(deathrow_recomp PRIVATE DR_VERSION="${DR_VERSION}")
+# The exe's icon and the settings menu's theme (RECOMP_ICON, RECOMP_THEME),
+# and its version in the four numbers a VERSIONINFO takes: v0.9.2-beta is
+# 0,9,2,0 and "dev" is 0,0,0,0.
+set(DR_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated.ico")
+set(DR_THEME "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-theme.txt")
+set(DR_VERSION_RC "0,0,0,0")
+if(DR_VERSION MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(DR_VERSION_RC "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+endif()
 configure_file(src/exonerated.rc.in ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc @ONLY)
 target_sources(deathrow_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/exonerated.rc)

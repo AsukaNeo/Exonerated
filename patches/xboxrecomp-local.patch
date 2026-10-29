@@ -12454,10 +12454,10 @@ index 331d2e2..ce3fdbe 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 3430107..913b9d0 100644
+index 3430107..0426bf9 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -7,28 +7,84 @@
+@@ -7,28 +7,89 @@
   * implemented, none of it is observable. This is the other half: a window that
   * reads that memory and puts it on screen.
   *
@@ -12488,7 +12488,12 @@ index 3430107..913b9d0 100644
 + *   RECOMP_FILTER        filter        sharp (default), bilinear, nearest
 + *   RECOMP_SCALE         scale         fit (default, 4:3 letterboxed),
 + *                                      integer, stretch
-+ *   RECOMP_FULLSCREEN    fullscreen    0 (default) or 1: start borderless
++ *   RECOMP_DISPLAY_MODE  mode          windowed (default), borderless or
++ *                                      fullscreen (the monitor switched to
++ *                                      resolution); without it, the older
++ *   RECOMP_FULLSCREEN    fullscreen    0 or 1 means windowed or borderless
++ *   RECOMP_MONITOR       monitor       \\.\DISPLAYn: the monitor (primary)
++ *   RECOMP_RESOLUTION    resolution    WxH for fullscreen, or desktop
 + *   RECOMP_WINDOW_SCALE  window_scale  initial window size, x the frame (2)
 + *   RECOMP_PRESENT       present       d3d11 (default) or gdi
 + *   RECOMP_RENDER_SCALE  render_scale  1 (default) to 4: the GPU back end
@@ -12521,7 +12526,7 @@ index 3430107..913b9d0 100644
 + *                                      D3D11 presenter and GPU renderer.
 + *   RECOMP_WINDOW_TITLE  title         title bar prefix (RECOMP_APP_NAME)
 + *
-+ * Keys: Alt+Enter or F11 toggles borderless fullscreen; F12 saves the frame
++ * Keys: Alt+Enter or F11 toggles windowed and the last full-screen mode; F12 saves the frame
 + * to screenshots/<app>_<date>_<time>.bmp in the working directory.
   *
   * Off unless RECOMP_FB_WINDOW is set.
@@ -12553,7 +12558,7 @@ index 3430107..913b9d0 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -38,15 +94,17 @@
+@@ -38,15 +99,17 @@
   * is the thing that receives the keys, so that is what has to remember
   * them. */
  #include "keyboard.h"   /* src/input */
@@ -12575,7 +12580,7 @@ index 3430107..913b9d0 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -64,68 +122,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -64,68 +127,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -12690,7 +12695,7 @@ index 3430107..913b9d0 100644
  }
  
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
-@@ -197,6 +239,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -197,6 +244,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -12698,7 +12703,7 @@ index 3430107..913b9d0 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -222,68 +265,345 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -222,68 +270,726 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12713,12 +12718,30 @@ index 3430107..913b9d0 100644
 +enum { FG_OFF, FG_BLEND, FG_MOTION };
 +
 +static const char *frame_gen_name(int f)
-+{
+ {
+-    static int full;
+-    static RECT saved;
+-    static LONG_PTR saved_style;
+-    if (!full) {
+-        MONITORINFO mi;
+-        mi.cbSize = sizeof mi;
+-        if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi))
+-            return;
+-        GetWindowRect(h, &saved);
+-        saved_style = GetWindowLongPtrA(h, GWL_STYLE);
+-        SetWindowLongPtrA(h, GWL_STYLE, (saved_style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+-        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+-                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+-        full = 1;
 +    return f == FG_MOTION ? "motion" : f == FG_BLEND ? "blend" : "off";
 +}
 +
 +static struct {
-+    int  vsync, filter, scale, fullscreen, window_scale, gdi, fps_counter;
++    int  vsync, filter, scale, window_scale, gdi, fps_counter;
++    int  mode;              /* MODE_WINDOWED, MODE_BORDERLESS or MODE_FULLSCREEN */
++    char monitor[32];       /* its device name, \\.\DISPLAY2; "" the primary */
++    int  res_w, res_h;      /* Fullscreen's resolution, 0x0 the desktop's */
 +    int  rumble, deadzone;  /* [input]; applied to the input layer at start */
 +    int  gpu;               /* the GPU back end draws (RECOMP_PB_BACKEND=d3d11) */
 +    int  render_scale;      /* GPU back end target size, x the guest's; read at start */
@@ -12751,14 +12774,7 @@ index 3430107..913b9d0 100644
 + * when the title was told the TV is widescreen (it then draws anamorphic,
 + * squeezed into the same frame, as for a TV that stretches it). */
 +static int display_width(void)
- {
--    static int full;
--    static RECT saved;
--    static LONG_PTR saved_style;
--    if (!full) {
--        MONITORINFO mi;
--        mi.cbSize = sizeof mi;
--        if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi))
++{
 +    return s_cfg.widescreen ? (int)((s_fb_height * 16 + 4) / 9) : (int)s_fb_width;
 +}
 +
@@ -12865,7 +12881,11 @@ index 3430107..913b9d0 100644
 +    s_ini[0] = 0;
 +    if (v && *v) {
 +        snprintf(s_ini, sizeof s_ini, "%s", v);
-+    } else {
+     } else {
+-        SetWindowLongPtrA(h, GWL_STYLE, saved_style);
+-        SetWindowPos(h, NULL, saved.left, saved.top, saved.right - saved.left,
+-                     saved.bottom - saved.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
+-        full = 0;
 +        char cwd[MAX_PATH];
 +        if (GetCurrentDirectoryA(sizeof cwd, cwd)) {
 +            snprintf(s_ini, sizeof s_ini, "%s\\%s.ini", cwd, s_cfg.app);
@@ -12884,7 +12904,15 @@ index 3430107..913b9d0 100644
 +    }
 +
 +    s_cfg.vsync = cfg_int("RECOMP_VSYNC", "vsync", 1) != 0;
-+    s_cfg.fullscreen = cfg_int("RECOMP_FULLSCREEN", "fullscreen", 0) != 0;
++    /* mode, or the older fullscreen=1 meaning Borderless */
++    cfg_str("RECOMP_DISPLAY_MODE", "mode", "", buf, sizeof buf);
++    s_cfg.mode = !_stricmp(buf, "fullscreen") ? 2 : !_stricmp(buf, "borderless") ? 1
++               : !_stricmp(buf, "windowed") ? 0
++               : cfg_int("RECOMP_FULLSCREEN", "fullscreen", 0) != 0 ? 1 : 0;
++    cfg_str("RECOMP_MONITOR", "monitor", "", s_cfg.monitor, sizeof s_cfg.monitor);
++    cfg_str("RECOMP_RESOLUTION", "resolution", "desktop", buf, sizeof buf);
++    if (sscanf(buf, "%dx%d", &s_cfg.res_w, &s_cfg.res_h) != 2 || s_cfg.res_w < 640 || s_cfg.res_h < 480)
++        s_cfg.res_w = s_cfg.res_h = 0;
 +    s_cfg.window_scale = cfg_int("RECOMP_WINDOW_SCALE", "window_scale", 2);
 +    if (s_cfg.window_scale < 1 || s_cfg.window_scale > 8)
 +        s_cfg.window_scale = 2;
@@ -12909,7 +12937,7 @@ index 3430107..913b9d0 100644
 +    {
 +        int a = cfg_int("RECOMP_ANISOTROPY", "anisotropy", 0);
 +        s_cfg.anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
-+    }
+     }
 +    s_cfg.sharpen = cfg_int("RECOMP_SHARPEN", "sharpen", 0);
 +    if (s_cfg.sharpen < 0) s_cfg.sharpen = 0;
 +    if (s_cfg.sharpen > 100) s_cfg.sharpen = 100;
@@ -12931,16 +12959,17 @@ index 3430107..913b9d0 100644
 +    }
 +
 +    fprintf(stderr, "  [FBWIN] settings%s%s: vsync %d filter %s scale %s "
-+            "fullscreen %d window x%d present %s renderer %s x%d widescreen %d\n",
++            "mode %d window x%d present %s renderer %s x%d widescreen %d\n",
 +            s_ini[0] ? " from " : " (no ini)", s_ini, s_cfg.vsync,
 +            s_cfg.filter == FILTER_NEAREST ? "nearest"
 +            : s_cfg.filter == FILTER_BILINEAR ? "bilinear" : "sharp",
 +            s_cfg.scale == SCALE_INTEGER ? "integer"
 +            : s_cfg.scale == SCALE_STRETCH ? "stretch" : "fit",
-+            s_cfg.fullscreen, s_cfg.window_scale, s_cfg.gdi ? "gdi" : "d3d11",
++            s_cfg.mode, s_cfg.window_scale, s_cfg.gdi ? "gdi" : "d3d11",
 +            s_cfg.gpu ? "gpu" : "software", s_cfg.render_scale, s_cfg.widescreen);
-+}
-+
+ }
+ 
+-static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 +/* Where the frame goes in a cw x ch client area. */
 +static void fit_rect(int cw, int ch, int *x, int *y, int *w, int *h)
 +{
@@ -12981,57 +13010,391 @@ index 3430107..913b9d0 100644
 +
 +static void ov_mouse(HWND hwnd, int x, int y, int button);
 +
-+/* Borderless fullscreen on the window's monitor, and back to the window it
-+ * was. Not exclusive fullscreen: Alt+Tab and a second monitor keep working,
-+ * and a flip-model swapchain covering the monitor is just as fast. */
-+static void toggle_fullscreen(HWND h)
-+{
-+    static WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
++/* ---- display mode, monitor and resolution ------------------------------- */
 +
-+    if (!s_is_fullscreen) {
++/* Three ways to show the game, as a PC game's display settings name them:
++ *
++ *   Windowed    a resizable window
++ *   Borderless  a window without a frame covering the monitor, at the
++ *               desktop's resolution. Alt+Tab and a second monitor keep
++ *               working, and a flip-model swapchain covering the monitor is
++ *               as fast as exclusive mode.
++ *   Fullscreen  the same window with the monitor switched to the chosen
++ *               resolution, at the highest refresh rate it offers for it.
++ *               The switch is CDS_FULLSCREEN, so Windows puts the desktop
++ *               back if the process dies. Alt+Tab puts it back too and
++ *               minimises the window; coming back switches again.
++ *
++ * Monitors are numbered as Windows' display settings number them
++ * (\\.\DISPLAY2 is 2). The process is per-monitor DPI aware (dpi_aware), so
++ * every size here is in real pixels. */
++enum { MODE_WINDOWED, MODE_BORDERLESS, MODE_FULLSCREEN, MODE_COUNT };
++static const char *const s_mode_names[MODE_COUNT] = { "Windowed", "Borderless", "Fullscreen" };
++static const char *const s_mode_keys[MODE_COUNT] = { "windowed", "borderless", "fullscreen" };
++#define MAX_MONITORS 8
++#define MAX_MODES 64
++
++typedef struct {
++    char dev[CCHDEVICENAME];   /* \\.\DISPLAY2 */
++    int  number;               /* 2 */
++    int  primary;
++    int  w, h;                 /* its desktop resolution */
++} Monitor;
++
++typedef struct { int w, h, hz; } DispMode;
++
++static struct {
++    Monitor  mons[MAX_MONITORS];
++    int      nmons;
++    DispMode modes[MAX_MODES];   /* of the monitor modes_dev names */
++    int      nmodes;
++    char     modes_dev[CCHDEVICENAME];
++    int      mode;               /* MODE_, as applied */
++    char     dev[CCHDEVICENAME]; /* the monitor, as applied; "" the primary */
++    int      full_w, full_h;     /* Fullscreen's resolution; 0 the desktop's */
++    int      last_full;          /* where F11 goes from Windowed */
++    char     switched[CCHDEVICENAME]; /* the monitor we switched, or "" */
++    DEVMODEA before;             /* its mode before the switch */
++    int      away;               /* Fullscreen let go for Alt+Tab */
++    WINDOWPLACEMENT wp;          /* the window before it left Windowed */
++    char     wp_dev[CCHDEVICENAME];
++    int      have_wp;
++} s_disp;
++static volatile LONG s_want_display_reapply;
++
++static void ov_status(const char *msg);
++
++/* Per-monitor DPI aware, on the window thread before its window: without it
++ * Windows stretches the window as a bitmap on a scaled display (blurred)
++ * and reports every size scaled. The process is asked first; if something
++ * already made a window or set it, the thread's own setting still covers
++ * this window. Windows 10 1703 and later; older ones get system DPI
++ * awareness. */
++static void dpi_aware(void)
++{
++    typedef BOOL (WINAPI *SetProcessContext)(HANDLE);
++    typedef HANDLE (WINAPI *SetThreadContext)(HANDLE);
++    HMODULE u = GetModuleHandleA("user32.dll");
++    SetProcessContext proc = u ? (SetProcessContext)(void *)GetProcAddress(u,
++                                     "SetProcessDpiAwarenessContext") : NULL;
++    SetThreadContext thread = u ? (SetThreadContext)(void *)GetProcAddress(u,
++                                     "SetThreadDpiAwarenessContext") : NULL;
++    /* (HANDLE)-4 is DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2. */
++    if (!proc)
++        SetProcessDPIAware();
++    else
++        proc((HANDLE)(INT_PTR)-4);
++    if (thread)
++        thread((HANDLE)(INT_PTR)-4);
++}
++
++static BOOL CALLBACK mon_enum_cb(HMONITOR hm, HDC dc, LPRECT rc, LPARAM lp)
++{
++    MONITORINFOEXA mi;
++    DEVMODEA dm;
++    Monitor *m;
++    (void)dc; (void)lp;
++    if (s_disp.nmons >= MAX_MONITORS)
++        return FALSE;
++    memset(&mi, 0, sizeof mi);
++    mi.cbSize = sizeof mi;
++    if (!GetMonitorInfoA(hm, (MONITORINFO *)&mi))
++        return TRUE;
++    m = &s_disp.mons[s_disp.nmons++];
++    memset(m, 0, sizeof *m);
++    snprintf(m->dev, sizeof m->dev, "%s", mi.szDevice);
++    m->number = atoi(mi.szDevice + strcspn(mi.szDevice, "0123456789"));
++    m->primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
++    /* The desktop's resolution: the mode it is in now, or, on the monitor
++     * we switched, the one it was in before. Not the registry's: a remote
++     * session or another program may have set one of its own. */
++    memset(&dm, 0, sizeof dm);
++    dm.dmSize = sizeof dm;
++    if (s_disp.switched[0] && !_stricmp(mi.szDevice, s_disp.switched)) {
++        m->w = (int)s_disp.before.dmPelsWidth;
++        m->h = (int)s_disp.before.dmPelsHeight;
++    } else if (EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsWidth) {
++        m->w = (int)dm.dmPelsWidth;
++        m->h = (int)dm.dmPelsHeight;
++    } else {
++        m->w = rc->right - rc->left;
++        m->h = rc->bottom - rc->top;
++    }
++    return TRUE;
++}
++
++/* The monitors now, in Windows' numbering. */
++static void mon_enum(void)
++{
++    int i, j;
++    s_disp.nmons = 0;
++    EnumDisplayMonitors(NULL, NULL, mon_enum_cb, 0);
++    for (i = 1; i < s_disp.nmons; i++)
++        for (j = i; j > 0 && s_disp.mons[j].number < s_disp.mons[j - 1].number; j--) {
++            Monitor t = s_disp.mons[j];
++            s_disp.mons[j] = s_disp.mons[j - 1];
++            s_disp.mons[j - 1] = t;
++        }
++}
++
++/* A monitor by its device name; the primary for "" or one not plugged in. */
++static int mon_find(const char *dev)
++{
++    int i, primary = 0;
++    for (i = 0; i < s_disp.nmons; i++) {
++        if (dev && dev[0] && !_stricmp(s_disp.mons[i].dev, dev))
++            return i;
++        if (s_disp.mons[i].primary)
++            primary = i;
++    }
++    return primary;
++}
++
++static struct { const char *dev; RECT rc, work; int found; } s_mon_q;
++
++static BOOL CALLBACK mon_rect_cb(HMONITOR hm, HDC dc, LPRECT r, LPARAM lp)
++{
++    MONITORINFOEXA mi;
++    (void)dc; (void)r; (void)lp;
++    memset(&mi, 0, sizeof mi);
++    mi.cbSize = sizeof mi;
++    if (GetMonitorInfoA(hm, (MONITORINFO *)&mi) && !_stricmp(mi.szDevice, s_mon_q.dev)) {
++        s_mon_q.rc = mi.rcMonitor;
++        s_mon_q.work = mi.rcWork;
++        s_mon_q.found = 1;
++        return FALSE;
++    }
++    return TRUE;
++}
++
++/* A monitor's rectangle and work area now, on the virtual desktop. */
++static void mon_rect(const char *dev, RECT *rc, RECT *work)
++{
++    s_mon_q.dev = dev;
++    s_mon_q.found = 0;
++    if (dev && dev[0])
++        EnumDisplayMonitors(NULL, NULL, mon_rect_cb, 0);
++    if (!s_mon_q.found) {
 +        MONITORINFO mi = { sizeof(MONITORINFO) };
-+        if (!GetWindowPlacement(h, &wp)
-+            || !GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY),
-+                                &mi))
-             return;
--        GetWindowRect(h, &saved);
--        saved_style = GetWindowLongPtrA(h, GWL_STYLE);
--        SetWindowLongPtrA(h, GWL_STYLE, (saved_style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
-+        SetWindowLongPtrA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-         SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
--                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
--                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
--        full = 1;
-+                     mi.rcMonitor.right - mi.rcMonitor.left,
-+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
-+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-+        s_is_fullscreen = 1;
-     } else {
--        SetWindowLongPtrA(h, GWL_STYLE, saved_style);
--        SetWindowPos(h, NULL, saved.left, saved.top, saved.right - saved.left,
--                     saved.bottom - saved.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
--        full = 0;
-+        SetWindowLongPtrA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-+        SetWindowPlacement(h, &wp);
-+        SetWindowPos(h, NULL, 0, 0, 0, 0,
-+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
-+                     | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-+        s_is_fullscreen = 0;
-     }
-+    InterlockedExchange(&s_resized, 1);
- }
- 
- static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
++        POINT o = { 0, 0 };
++        GetMonitorInfoA(MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY), &mi);
++        s_mon_q.rc = mi.rcMonitor;
++        s_mon_q.work = mi.rcWork;
++    }
++    *rc = s_mon_q.rc;
++    *work = s_mon_q.work;
++}
++
++static int dispmode_cmp(const void *a, const void *b)
++{
++    const DispMode *x = (const DispMode *)a, *y = (const DispMode *)b;
++    return x->w != y->w ? y->w - x->w : y->h - x->h;   /* largest first */
++}
++
++/* The resolutions a monitor offers in 32-bit colour, each with its highest
++ * refresh rate, largest first; 640x480 and up. */
++static void modes_load(const char *dev)
++{
++    DEVMODEA dm;
++    DWORD i;
++    int k;
++    if (!_stricmp(dev, s_disp.modes_dev) && s_disp.nmodes)
++        return;
++    snprintf(s_disp.modes_dev, sizeof s_disp.modes_dev, "%s", dev);
++    s_disp.nmodes = 0;
++    memset(&dm, 0, sizeof dm);
++    dm.dmSize = sizeof dm;
++    for (i = 0; EnumDisplaySettingsExA(dev, i, &dm, 0); i++) {
++        if ((dm.dmBitsPerPel && dm.dmBitsPerPel < 32) || dm.dmPelsWidth < 640 || dm.dmPelsHeight < 480)
++            continue;
++        for (k = 0; k < s_disp.nmodes; k++)
++            if (s_disp.modes[k].w == (int)dm.dmPelsWidth && s_disp.modes[k].h == (int)dm.dmPelsHeight)
++                break;
++        if (k == s_disp.nmodes) {
++            if (k == MAX_MODES)
++                continue;
++            s_disp.modes[k].w = (int)dm.dmPelsWidth;
++            s_disp.modes[k].h = (int)dm.dmPelsHeight;
++            s_disp.modes[k].hz = 0;
++            s_disp.nmodes++;
++        }
++        if ((int)dm.dmDisplayFrequency > s_disp.modes[k].hz)
++            s_disp.modes[k].hz = (int)dm.dmDisplayFrequency;
++    }
++    qsort(s_disp.modes, (size_t)s_disp.nmodes, sizeof s_disp.modes[0], dispmode_cmp);
++}
++
++static int modes_find(int w, int h)
++{
++    int k;
++    for (k = 0; k < s_disp.nmodes; k++)
++        if (s_disp.modes[k].w == w && s_disp.modes[k].h == h)
++            return k;
++    return -1;
++}
++
++/* The switched monitor back to the mode it was in before. That is usually
++ * the registry's, which a plain reset gives back; when it was not (a remote
++ * session's own resolution, say) the mode itself is set again. */
++static void display_release(void)
++{
++    DEVMODEA reg;
++    if (!s_disp.switched[0])
++        return;
++    memset(&reg, 0, sizeof reg);
++    reg.dmSize = sizeof reg;
++    if (EnumDisplaySettingsA(s_disp.switched, ENUM_REGISTRY_SETTINGS, &reg)
++        && reg.dmPelsWidth == s_disp.before.dmPelsWidth
++        && reg.dmPelsHeight == s_disp.before.dmPelsHeight
++        && reg.dmDisplayFrequency == s_disp.before.dmDisplayFrequency) {
++        ChangeDisplaySettingsExA(s_disp.switched, NULL, NULL, 0, NULL);
++    } else {
++        DEVMODEA dm = s_disp.before;
++        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
++        ChangeDisplaySettingsExA(s_disp.switched, &dm, NULL, 0, NULL);
++    }
++    fprintf(stderr, "  [FBWIN] %s back to %lux%lu\n", s_disp.switched,
++            s_disp.before.dmPelsWidth, s_disp.before.dmPelsHeight);
++    s_disp.switched[0] = 0;
++}
++
++/* Switch a monitor to w x h; nothing to do at its desktop resolution. */
++static int display_switch(const Monitor *m, int w, int h)
  {
 -    /* First press only (bit 30: the key was already down), and with Alt held
 -     * (bit 29) for Enter; neither reaches the key table. */
 -    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
 -        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
 -        fb_toggle_fullscreen(h);
--        return 0;
--    }
++    DEVMODEA dm;
++    LONG rc;
++    int k;
++    if (!w || (w == m->w && h == m->h))
++        return 1;
++    modes_load(m->dev);
++    k = modes_find(w, h);
++    memset(&dm, 0, sizeof dm);
++    dm.dmSize = sizeof dm;
++    dm.dmPelsWidth = (DWORD)w;
++    dm.dmPelsHeight = (DWORD)h;
++    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
++    if (k >= 0 && s_disp.modes[k].hz) {
++        dm.dmDisplayFrequency = (DWORD)s_disp.modes[k].hz;
++        dm.dmFields |= DM_DISPLAYFREQUENCY;
++    }
++    memset(&s_disp.before, 0, sizeof s_disp.before);
++    s_disp.before.dmSize = sizeof s_disp.before;
++    if (!EnumDisplaySettingsA(m->dev, ENUM_CURRENT_SETTINGS, &s_disp.before))
++        return 0;
++    rc = ChangeDisplaySettingsExA(m->dev, &dm, NULL, CDS_FULLSCREEN, NULL);
++    if (rc != DISP_CHANGE_SUCCESSFUL) {
++        fprintf(stderr, "  [FBWIN] %s: %dx%d refused (%ld)\n", m->dev, w, h, rc);
+         return 0;
+     }
 -    if (m == WM_SYSKEYDOWN && w == VK_RETURN)
 -        return 0;                       /* auto-repeat of Alt+Enter */
++    snprintf(s_disp.switched, sizeof s_disp.switched, "%s", m->dev);
++    fprintf(stderr, "  [FBWIN] %s switched to %dx%d at %d Hz\n", m->dev, w, h,
++            k >= 0 ? s_disp.modes[k].hz : 0);
++    return 1;
++}
++
++/* A window's size for the frame: window_scale times it, at the display's
++ * scaling so it looks as large as it did before the window was DPI aware,
++ * shrunk by whole steps to fit the work area. */
++static void window_size(const RECT *work, int dpi, RECT *r)
++{
++    int k = s_cfg.window_scale;
++    for (;;) {
++        r->left = 0; r->top = 0;
++        r->right = (LONG)(display_width() * k * dpi / 96);
++        r->bottom = (LONG)(s_fb_height * (uint32_t)k * (uint32_t)dpi / 96);
++        AdjustWindowRect(r, WS_OVERLAPPEDWINDOW, FALSE);
++        if (k == 1 || (r->right - r->left <= work->right - work->left
++                       && r->bottom - r->top <= work->bottom - work->top))
++            break;
++        k--;
++    }
++}
++
++static int window_dpi(HWND h)
++{
++    typedef UINT (WINAPI *GetDpi)(HWND);
++    HMODULE u = GetModuleHandleA("user32.dll");
++    GetDpi get = u ? (GetDpi)(void *)GetProcAddress(u, "GetDpiForWindow") : NULL;
++    UINT d = get && h ? get(h) : 0;
++    if (!d) {
++        HDC dc = GetDC(NULL);
++        d = (UINT)GetDeviceCaps(dc, LOGPIXELSX);
++        ReleaseDC(NULL, dc);
++    }
++    return d ? (int)d : 96;
++}
++
++/* Show the window in a mode on a monitor (Fullscreen at full_w x full_h). */
++static void display_apply(HWND h, int mode, const char *dev)
++{
++    int mi = mon_find(dev);
++    const Monitor *m = s_disp.nmons ? &s_disp.mons[mi] : NULL;
++    RECT rc, work;
++
++    if (s_disp.mode == MODE_WINDOWED && mode != MODE_WINDOWED) {
++        s_disp.wp.length = sizeof s_disp.wp;
++        s_disp.have_wp = GetWindowPlacement(h, &s_disp.wp);
++        snprintf(s_disp.wp_dev, sizeof s_disp.wp_dev, "%s", s_disp.dev);
++    }
++    display_release();
++    if (mode == MODE_FULLSCREEN && m && !display_switch(m, s_disp.full_w, s_disp.full_h))
++        ov_status("The monitor refused that resolution; showing the desktop's");
++    mon_rect(m ? m->dev : "", &rc, &work);
++
++    if (mode != MODE_WINDOWED) {
++        SetWindowLongPtrA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
++        SetWindowPos(h, HWND_TOP, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
++                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        s_disp.last_full = mode;
++    } else {
++        SetWindowLongPtrA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
++        if (s_disp.mode != MODE_WINDOWED && s_disp.have_wp
++            && !_stricmp(s_disp.wp_dev, m ? m->dev : "")) {
++            /* Back where it was. */
++            SetWindowPlacement(h, &s_disp.wp);
++            SetWindowPos(h, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
++                         | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        } else {
++            /* Centred on the monitor's work area: its size kept when it
++             * was a window that fits there, else the default size. */
++            RECT wr, fresh;
++            int ww, wh;
++            GetWindowRect(h, &wr);
++            ww = wr.right - wr.left;
++            wh = wr.bottom - wr.top;
++            if (s_disp.mode != MODE_WINDOWED || ww > work.right - work.left
++                || wh > work.bottom - work.top) {
++                window_size(&work, window_dpi(h), &fresh);
++                ww = fresh.right - fresh.left;
++                wh = fresh.bottom - fresh.top;
++            }
++            SetWindowPos(h, NULL, work.left + (work.right - work.left - ww) / 2,
++                         work.top + (work.bottom - work.top - wh) / 2, ww, wh,
++                         SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        }
++    }
++    s_disp.mode = mode;
++    snprintf(s_disp.dev, sizeof s_disp.dev, "%s", m ? m->dev : "");
++    s_is_fullscreen = mode != MODE_WINDOWED;
++    fprintf(stderr, "  [FBWIN] display: %s on %s\n", s_mode_names[mode], m ? m->dev : "?");
++    InterlockedExchange(&s_resized, 1);
++}
++
++/* Alt+Enter or F11: Windowed, or back to the mode it was last in. */
++static void toggle_fullscreen(HWND h)
++{
++    display_apply(h, s_disp.mode == MODE_WINDOWED ? s_disp.last_full : MODE_WINDOWED, s_disp.dev);
++}
++
++static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
++{
      switch (m) {
      case WM_CLOSE:
      case WM_DESTROY:
@@ -13051,11 +13414,34 @@ index 3430107..913b9d0 100644
 -            fflush(stdout);
 -            fflush(stderr);
 -            TerminateProcess(GetCurrentProcess(), 0);
--        }
-         return 0;
- 
++        return 0;
++
 +    case WM_SIZE:
 +        InterlockedExchange(&s_resized, 1);
++        return 0;
++
++    /* A window dragged to a monitor with other scaling: the size Windows
++     * suggests for it there. Borderless and Fullscreen cover their monitor
++     * already. */
++    case WM_DPICHANGED:
++        if (s_disp.mode == MODE_WINDOWED) {
++            const RECT *r = (const RECT *)l;
++            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
++                         SWP_NOZORDER | SWP_NOACTIVATE);
+         }
+         return 0;
+ 
++    /* Fullscreen at a resolution of its own: Alt+Tab gives the desktop back
++     * and minimises; coming back switches again (in the window loop, out of
++     * this message). */
++    case WM_ACTIVATEAPP:
++        if (!w && s_disp.mode == MODE_FULLSCREEN && s_disp.switched[0]) {
++            display_release();
++            s_disp.away = 1;
++            ShowWindow(h, SW_MINIMIZE);
++        } else if (w && s_disp.away) {
++            InterlockedExchange(&s_want_display_reapply, 1);
++        }
 +        return 0;
 +
 +    case WM_ERASEBKGND:
@@ -13089,7 +13475,7 @@ index 3430107..913b9d0 100644
          xbox_InputKeySet((int)w, 1);
          /* A Shift, Ctrl or Alt is also its side's key, for bindings to
           * "lshift" and the like; wParam stays the either-side one. */
-@@ -329,11 +649,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -329,11 +1035,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  
      /* Mouse buttons go in the same table, for bindings that name them.
       * Capturing the mouse while one is down delivers its release even
@@ -13109,7 +13495,7 @@ index 3430107..913b9d0 100644
          {
              int down = 0;
              int vk = xbox_InputWin32MouseVk(m, (uint32_t)w, &down);
-@@ -350,6 +677,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -350,6 +1063,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -13124,7 +13510,7 @@ index 3430107..913b9d0 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -435,41 +770,2077 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -435,145 +1156,2758 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -13139,14 +13525,24 @@ index 3430107..913b9d0 100644
 + * reads a pad at rest (xbox_InputSetSuspended), so moving through the menu
 + * does not also play; the game itself keeps running.
 + *
++ * The rows sit under tabs -- Display, Graphics, Controls, System -- switched
++ * with Q/E, Tab or the pad's bumpers, the way a PC game's own options screen
++ * reads. The selected row's description shows under the list, and the
++ * footer shows the keys or the pad's buttons, whichever was used last.
++ *
 + * Drawn with GDI into a 32-bit DIB the size of the client area -- real
 + * anti-aliased text at the window's own resolution -- then blended over the
 + * frame by the D3D11 presenter, or copied over it opaque by the GDI one. */
-+enum { OV_FULLSCREEN, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
++enum { OV_DISPMODE, OV_MONITOR, OV_RESOLUTION, OV_APPLY, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
 +       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FRAMEGEN, OV_FPS,
 +       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
 +       OV_PLAY, OV_SETTINGS, OV_BACK, OV_ITEMS };
 +#define OV_MAX_ROWS 24
++
++enum { PG_DISPLAY, PG_GRAPHICS, PG_CONTROLS, PG_SYSTEM, PG_COUNT };
++static const char *const s_page_names[PG_COUNT] = {
++    "Display", "Graphics", "Controls", "System"
++};
 +
 +/* The renderer and widescreen picked in the overlay. The back end is chosen
 + * once and the title reads its video settings once, so during play a new
@@ -13156,8 +13552,14 @@ index 3430107..913b9d0 100644
 +static int s_gpu_pending = -1;
 +static int s_wide_pending = -1;
 +
++/* The display mode, monitor (an index of s_disp.mons) and Fullscreen
++ * resolution chosen in the menu and not yet applied (display_hold). */
++static struct { int held, mode, mon, w, h; } s_dp;
++
 +static struct {
 +    int       sel;               /* a row of ov_rows() */
++    int       page;              /* the tab shown, PG_ */
++    int       pad_prompts;       /* the footer shows the pad's buttons, not keys */
 +    int       dirty;             /* the image needs drawing again */
 +    int       release_wait;      /* closed: give the pad back once released */
 +    HDC       dc;
@@ -13168,6 +13570,8 @@ index 3430107..913b9d0 100644
 +    int       nrects;
 +    RECT      hit[OV_MAX_ROWS];  /* each row as last drawn, for the mouse */
 +    int       nhit;
++    RECT      tab_hit[PG_COUNT]; /* each tab as last drawn */
++    int       ntab_hit;
 +    char      status[160];
 +    DWORD     status_until;
 +    char      fps[32];
@@ -13184,7 +13588,13 @@ index 3430107..913b9d0 100644
 +}
 +
 +static void ov_status(const char *msg)
-+{
+ {
+-    static LONG lw, lh;
+-    RECT c;
+-    LONG cw, ch, w, h;
+-    GetClientRect(hwnd, &c);
+-    cw = c.right - c.left; ch = c.bottom - c.top;
+-    if (cw <= 0 || ch <= 0)
 +    snprintf(s_ov.status, sizeof s_ov.status, "%s", msg);
 +    s_ov.status_until = GetTickCount() + 3000;
 +    s_ov.dirty = 1;
@@ -13193,51 +13603,310 @@ index 3430107..913b9d0 100644
 +static void ov_set_open(int on)
 +{
 +    if (s_launcher || on == (s_ov_open != 0))
-+        return;
+         return;
+-    if (cw != lw || ch != lh) {
+-        FillRect(hdc, &c, (HBRUSH)GetStockObject(BLACK_BRUSH));
+-        lw = cw; lh = ch;
+-    }
+-    if ((long long)cw * s_fb_height <= (long long)ch * s_fb_width) {
+-        w = cw; h = (LONG)((long long)cw * s_fb_height / s_fb_width);
 +    InterlockedExchange(&s_ov_open, on);
++    s_dp.held = 0;                  /* display changes not applied are dropped */
 +    if (on) {
++        mon_enum();                 /* a monitor may have come or gone */
 +        xbox_InputKeysClear();
 +        xbox_InputSetSuspended(1);
 +        s_ov.release_wait = 0;
-+    } else {
+     } else {
+-        h = ch; w = (LONG)((long long)ch * s_fb_width / s_fb_height);
 +        /* Not yet: the B or Start that closed it is still held, and the
 +         * title would take it as a press. ov_poll_pad lets go once it is
 +         * up. */
 +        s_ov.release_wait = 1;
-+    }
+     }
+-    SetStretchBltMode(hdc, HALFTONE);
+-    SetBrushOrgEx(hdc, 0, 0, NULL);     /* HALFTONE wants it after the mode */
+-    StretchDIBits(hdc, (cw - w) / 2, (ch - h) / 2, w, h,
+-                  0, 0, (int)s_fb_width, (int)s_fb_height,
+-                  s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
 +    s_ov.dirty = 1;
-+}
-+
+ }
+ 
+-/* The converted frame in s_rgb, on screen: D3D11 when it is up (which waits
+- * for vsync, so returns 1 when the loop is already paced), else GDI. */
+-static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 +static int restart_pending(void)
-+{
+ {
+-    if (gpu_present_active())
+-        return gpu_present_frame(s_rgb);
+-    gdi_blit(hwnd, hdc, bi);
+-    return 0;
 +    return (s_gpu_pending >= 0 && s_gpu_pending != s_cfg.gpu)
 +        || (s_wide_pending >= 0 && s_wide_pending != s_cfg.widescreen);
+ }
+ 
+-static DWORD WINAPI fb_thread(LPVOID unused)
++/* The display mode, monitor and Fullscreen resolution as the menu shows
++ * them: the applied ones until one is changed, then held until "Apply
++ * display changes", as Windows' own display settings do. */
++static void display_hold(void)
+ {
+-    HWND hwnd;
+-    HDC hdc;
+-    BITMAPINFO bi;
+-    RECT r;
+-    int fb_pinned;
++    if (s_dp.held)
++        return;
++    if (!s_disp.nmons)
++        mon_enum();
++    s_dp.held = 1;
++    s_dp.mode = s_disp.mode;
++    s_dp.mon = mon_find(s_disp.dev);
++    s_dp.w = s_disp.full_w;
++    s_dp.h = s_disp.full_h;
++}
+ 
+-    (void)unused;
++static int display_pending(void)
++{
++    return s_dp.held && (s_dp.mode != s_disp.mode
++                         || _stricmp(s_disp.mons[s_dp.mon].dev, s_disp.dev)
++                         || s_dp.w != s_disp.full_w || s_dp.h != s_disp.full_h);
++}
+ 
+-    {
+-        WNDCLASSA wc;
+-        memset(&wc, 0, sizeof(wc));
+-        wc.lpfnWndProc   = fb_wndproc;
+-        wc.hInstance     = GetModuleHandleA(NULL);
+-        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+-        wc.lpszClassName = "XboxRecompFramebuffer";
+-        RegisterClassA(&wc);
+-    }
+-    {
+-        /* RECOMP_WINDOW_SCALE (1-8, default 2, as in the SDL window): the
+-         * client area is the frame times this, made smaller until the window
+-         * fits the desktop work area, and centred on it. */
+-        const char *e = getenv("RECOMP_WINDOW_SCALE");
+-        int scale = e ? atoi(e) : 2;
+-        RECT work;
+-        if (scale < 1 || scale > 8)
+-            scale = 2;
+-        if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
+-            work.left = work.top = 0; work.right = 1920; work.bottom = 1080;
+-        }
+-        for (;; scale--) {
+-            r.left = 0; r.top = 0;
+-            r.right = (LONG)s_fb_width * scale; r.bottom = (LONG)s_fb_height * scale;
+-            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+-            if (scale <= 1 || (r.right - r.left <= work.right - work.left
+-                               && r.bottom - r.top <= work.bottom - work.top))
+-                break;
+-        }
+-        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
+-                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+-                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
+-                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
+-                               r.right - r.left, r.bottom - r.top,
+-                               NULL, NULL, GetModuleHandleA(NULL), NULL);
++/* The held resolution, 0x0 (the desktop's) written as the desktop's size. */
++static void display_held_res(int *w, int *h)
++{
++    const Monitor *m = &s_disp.mons[s_dp.mon];
++    *w = s_dp.w ? s_dp.w : m->w;
++    *h = s_dp.w ? s_dp.h : m->h;
 +}
 +
-+/* The rows the menu shows now, as OV_ items: the launcher's title card, its
-+ * settings page, or the in-game overlay. */
++static void display_value(int item, char *value, size_t n)
++{
++    const Monitor *m;
++    int w, h;
++    if (!s_dp.held) {
++        display_hold();
++        s_dp.held = 0;              /* only read: nothing is held yet */
+     }
+-    if (!hwnd) {
+-        InterlockedExchange(&s_fb_running, 0);
+-        return 0;
++    if (!s_disp.nmons) {
++        snprintf(value, n, "-");
++        return;
+     }
+-    hdc = GetDC(hwnd);
+-    {
+-        const char *fs = getenv("RECOMP_FULLSCREEN");
+-        if (fs && *fs && *fs != '0')
+-            fb_toggle_fullscreen(hwnd);
++    m = &s_disp.mons[s_dp.mon];
++    switch (item) {
++    case OV_DISPMODE:
++        snprintf(value, n, "%s", s_mode_names[s_dp.mode]);
++        break;
++    case OV_MONITOR:
++        snprintf(value, n, "%d: %dx%d%s", m->number, m->w, m->h, m->primary ? " (primary)" : "");
++        break;
++    case OV_RESOLUTION:
++        if (s_dp.mode == MODE_BORDERLESS) {
++            snprintf(value, n, "%dx%d (desktop)", m->w, m->h);
++        } else if (s_dp.mode == MODE_WINDOWED) {
++            snprintf(value, n, "Fullscreen only");
++        } else {
++            int k;
++            display_held_res(&w, &h);
++            modes_load(m->dev);
++            k = modes_find(w, h);
++            if (w == m->w && h == m->h)
++                snprintf(value, n, "%dx%d (desktop)", w, h);
++            else if (k >= 0 && s_disp.modes[k].hz)
++                snprintf(value, n, "%dx%d, %d Hz", w, h, s_disp.modes[k].hz);
++            else
++                snprintf(value, n, "%dx%d", w, h);
++        }
++        break;
+     }
++}
+ 
+-    memset(&bi, 0, sizeof(bi));
+-    bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
+-    bi.bmiHeader.biWidth       = (LONG)s_fb_width;
+-    bi.bmiHeader.biHeight      = -(LONG)s_fb_height;   /* top-down */
+-    bi.bmiHeader.biPlanes      = 1;
+-    bi.bmiHeader.biBitCount    = 32;
+-    bi.bmiHeader.biCompression = BI_RGB;
++static void display_change(int item, int dir)
++{
++    const Monitor *m;
++    int w, h, k;
++    display_hold();
++    if (!s_disp.nmons)
++        return;
++    switch (item) {
++    case OV_DISPMODE:
++        s_dp.mode = (s_dp.mode + MODE_COUNT + dir) % MODE_COUNT;
++        break;
++    case OV_MONITOR:
++        s_dp.mon = (s_dp.mon + s_disp.nmons + dir) % s_disp.nmons;
++        /* The resolution goes with it where the new monitor has it. */
++        m = &s_disp.mons[s_dp.mon];
++        modes_load(m->dev);
++        if (s_dp.w && modes_find(s_dp.w, s_dp.h) < 0)
++            s_dp.w = s_dp.h = 0;
++        break;
++    case OV_RESOLUTION:
++        if (s_dp.mode != MODE_FULLSCREEN) {
++            ov_status("Resolution is for Fullscreen; Borderless uses the desktop's");
++            return;
++        }
++        m = &s_disp.mons[s_dp.mon];
++        modes_load(m->dev);
++        if (!s_disp.nmodes)
++            return;
++        display_held_res(&w, &h);
++        k = modes_find(w, h);
++        /* Down the list is smaller: Right steps to a larger one. */
++        k = k < 0 ? 0 : (k - dir + s_disp.nmodes) % s_disp.nmodes;
++        s_dp.w = s_disp.modes[k].w;
++        s_dp.h = s_disp.modes[k].h;
++        if (s_dp.w == m->w && s_dp.h == m->h)
++            s_dp.w = s_dp.h = 0;    /* the desktop's own: no switch */
++        break;
++    }
++}
+ 
+-    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
+-    /* A window pinned to one address shows that memory and nothing else. */
+-    fb_pinned = getenv("RECOMP_FB_VA") != NULL;
++static void display_commit(HWND hwnd)
++{
++    if (!display_pending())
++        return;
++    s_disp.full_w = s_dp.w;
++    s_disp.full_h = s_dp.h;
++    display_apply(hwnd, s_dp.mode, s_disp.mons[s_dp.mon].dev);
++    s_dp.held = 0;
++    s_ov.sel = 0;
++    ov_status("Display settings applied");
++}
+ 
+-    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
+-            s_fb_width, s_fb_height);
+-    if (gpu_present_enabled())
+-        gpu_present_init(hwnd, s_fb_width, s_fb_height);
++/* The rows under one tab, as OV_ items. A setting that waits for a restart
++ * puts "Restart now" at the foot of every tab, where it was just changed. */
++static int ov_page_rows(int page, int *rows)
++{
++    int n = 0;
++    switch (page) {
++    case PG_DISPLAY:
++        rows[n++] = OV_DISPMODE;
++        rows[n++] = OV_MONITOR;
++        rows[n++] = OV_RESOLUTION;
++        if (display_pending())
++            rows[n++] = OV_APPLY;
++        rows[n++] = OV_VSYNC;
++        rows[n++] = OV_SCALE;
++        rows[n++] = OV_WIDE;
++        rows[n++] = OV_FRAMEGEN;
++        rows[n++] = OV_FPS;
++        break;
++    case PG_GRAPHICS:
++        rows[n++] = OV_GPU;
++        rows[n++] = OV_RENDER;
++        rows[n++] = OV_FILTER;
++        rows[n++] = OV_ANISO;
++        rows[n++] = OV_SHARPEN;
++        rows[n++] = OV_FXAA;
++        break;
++    case PG_CONTROLS:
++        rows[n++] = OV_RUMBLE;
++        rows[n++] = OV_DEADZONE;
++        break;
++    default:
++        if (s_launcher) {
++            rows[n++] = OV_BACK;
++            return n;
++        }
++        rows[n++] = OV_CLOSE;
++        rows[n++] = OV_SCREENSHOT;
++        rows[n++] = OV_SAVE;
++        if (restart_pending())
++            rows[n++] = OV_RESTART;
++        rows[n++] = OV_EXIT;
++        return n;
++    }
++    if (!s_launcher && restart_pending())
++        rows[n++] = OV_RESTART;
++    return n;
++}
++
++/* The most rows any tab has, so the panel keeps its size between tabs. */
++static int ov_max_rows(void)
++{
++    int rows[OV_MAX_ROWS], p, n, most = 0;
++    for (p = 0; p < PG_COUNT; p++) {
++        n = ov_page_rows(p, rows);
++        if (n > most)
++            most = n;
++    }
++    /* and room for an Apply or Restart row to come without the panel
++     * growing under the cursor */
++    return most < OV_MAX_ROWS ? most + 1 : most;
++}
++
++/* The rows the menu shows now, as OV_ items: the launcher's title card, or
++ * the current tab of its settings page or of the in-game overlay. */
 +static int ov_rows(int *rows)
 +{
-+    int n = 0, i;
++    int n = 0;
 +    if (s_launcher == LAUNCHER_CARD) {
 +        rows[n++] = OV_PLAY;
 +        rows[n++] = OV_SETTINGS;
 +        rows[n++] = OV_EXIT;
 +        return n;
 +    }
-+    for (i = OV_FULLSCREEN; i <= OV_DEADZONE; i++)
-+        rows[n++] = i;
-+    if (s_launcher) {
-+        rows[n++] = OV_BACK;
-+        return n;
-+    }
-+    rows[n++] = OV_SCREENSHOT;
-+    rows[n++] = OV_SAVE;
-+    if (restart_pending())
-+        rows[n++] = OV_RESTART;
-+    rows[n++] = OV_EXIT;
-+    rows[n++] = OV_CLOSE;
-+    return n;
++    return ov_page_rows(s_ov.page, rows);
 +}
 +
 +/* The item under the selection, keeping the selection on the list. */
@@ -13264,10 +13933,10 @@ index 3430107..913b9d0 100644
 +static void ov_item(int i, const char **label, char *value, size_t n)
 +{
 +    static const char *const labels[OV_ITEMS] = {
-+        "Fullscreen", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
++        "Display mode", "Monitor", "Resolution", "Apply display changes", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
 +        "Widescreen (16:9)", "Anisotropic filtering", "Sharpening", "FXAA",
 +        "Frame generation", "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
-+        "Save settings", "Restart now to apply", "Exit to Windows", "Close",
++        "Save settings", "Restart now to apply", "Exit to Windows", "Resume",
 +        "Play", "Settings", "Back"
 +    };
 +    if (s_gpu_pending < 0)
@@ -13277,7 +13946,9 @@ index 3430107..913b9d0 100644
 +    *label = labels[i];
 +    value[0] = 0;
 +    switch (i) {
-+    case OV_FULLSCREEN: snprintf(value, n, "%s", s_is_fullscreen ? "On" : "Off"); break;
++    case OV_DISPMODE:
++    case OV_MONITOR:
++    case OV_RESOLUTION: display_value(i, value, n); break;
 +    case OV_VSYNC:      snprintf(value, n, "%s", s_cfg.vsync ? "On" : "Off"); break;
 +    case OV_FILTER:     snprintf(value, n, "%s", s_cfg.filter == FILTER_SHARP ? "Sharp"
 +                                 : s_cfg.filter == FILTER_BILINEAR ? "Bilinear" : "Nearest"); break;
@@ -13326,6 +13997,38 @@ index 3430107..913b9d0 100644
 +    }
 +}
 +
++/* What each row does, shown under the list while it is selected. */
++static const char *ov_help(int i)
++{
++    static const char *const help[OV_ITEMS] = {
++        "Windowed, Borderless (the desktop's resolution) or Fullscreen (the resolution below). Alt+Enter or F11 also switch.",
++        "The monitor the game shows on, numbered as Windows numbers them.",
++        "Fullscreen's resolution, from the ones the monitor offers, at its highest refresh rate.",
++        "Show the display mode, monitor and resolution chosen above. Closing the menu drops them.",
++        "Wait for the display between frames: no tearing, slightly more input lag.",
++        "How the picture is scaled to the window. Sharp keeps pixels crisp without shimmer.",
++        "Stretch fills the window, Fit keeps the console's 4:3 shape, Integer scales in whole steps.",
++        "GPU draws with Direct3D 11 at higher resolutions; Software draws as the console did.",
++        "Draws the game at a multiple of the Xbox's resolution. Higher is sharper and slower.",
++        "Tells the game the screen is 16:9, for games with a widescreen mode of their own.",
++        "Keeps textures sharp at glancing angles, such as floors in the distance.",
++        "Contrast-adaptive sharpening over the finished picture.",
++        "Smooths jagged edges across the whole picture, menus included.",
++        "Makes frames between the game's own for high refresh displays. Motion follows movement.",
++        "Shows the frame rate in the top left corner.",
++        "Controller vibration.",
++        "Ignores small stick movements, for worn sticks that drift. Off leaves it to the game.",
++        "Saves the picture on screen beside the game. F12 also takes one.",
++        "Keeps these settings for next time.",
++        "Some changes take effect when the game starts. Saves your settings and restarts it.",
++        "Closes the game. Progress since your last save is lost.",
++        "Back to the game.",
++        NULL, NULL,
++        "Back to the title. Your settings are saved."
++    };
++    return i >= 0 && i < OV_ITEMS ? help[i] : NULL;
++}
++
 +/* Write the current settings to the ini: the one read at start, or a new
 + * <app>.ini in the working directory. quiet: no status line (the launcher
 + * saves on its own when you leave its settings). */
@@ -13343,7 +14046,11 @@ index 3430107..913b9d0 100644
 +    ok = WritePrivateProfileStringA("display", "vsync", s_cfg.vsync ? "1" : "0", s_ini);
 +    ok &= WritePrivateProfileStringA("display", "filter", filter_name(s_cfg.filter), s_ini);
 +    ok &= WritePrivateProfileStringA("display", "scale", scale_name(s_cfg.scale), s_ini);
++    ok &= WritePrivateProfileStringA("display", "mode", s_mode_keys[s_disp.mode], s_ini);
 +    ok &= WritePrivateProfileStringA("display", "fullscreen", s_is_fullscreen ? "1" : "0", s_ini);
++    ok &= WritePrivateProfileStringA("display", "monitor", s_disp.dev, s_ini);
++    snprintf(v, sizeof v, "%dx%d", s_disp.full_w, s_disp.full_h);
++    ok &= WritePrivateProfileStringA("display", "resolution", s_disp.full_w ? v : "desktop", s_ini);
 +    ok &= WritePrivateProfileStringA("display", "fps_counter", s_cfg.fps_counter ? "1" : "0", s_ini);
 +    snprintf(v, sizeof v, "%d", s_cfg.window_scale);
 +    ok &= WritePrivateProfileStringA("display", "window_scale", v, s_ini);
@@ -13425,6 +14132,7 @@ index 3430107..913b9d0 100644
 +
 +static void launcher_page(int page, int sel)
 +{
++    s_dp.held = 0;
 +    InterlockedExchange(&s_launcher, page);
 +    s_ov.sel = sel;
 +    s_ov.dirty = 1;
@@ -13444,7 +14152,9 @@ index 3430107..913b9d0 100644
 +{
 +    int i;
 +    switch (ov_current()) {
-+    case OV_FULLSCREEN: toggle_fullscreen(hwnd); break;
++    case OV_DISPMODE:
++    case OV_MONITOR:
++    case OV_RESOLUTION: display_change(ov_current(), dir); break;
 +    case OV_VSYNC:      s_cfg.vsync = !s_cfg.vsync; break;
 +    case OV_FILTER:     s_cfg.filter = (s_cfg.filter + 3 + dir) % 3; break;
 +    case OV_SCALE:      s_cfg.scale = (s_cfg.scale + 3 + dir) % 3; break;
@@ -13510,6 +14220,7 @@ index 3430107..913b9d0 100644
 +    case OV_SCREENSHOT: take_screenshot(); ov_status(s_notice); break;
 +    case OV_SAVE:       ov_save(); break;
 +    case OV_RESTART:    restart_program(); break;
++    case OV_APPLY:      display_commit(hwnd); break;
 +    case OV_EXIT:       request_exit(); break;
 +    case OV_CLOSE:      ov_set_open(0); break;
 +    case OV_PLAY:       launcher_play(); break;
@@ -13526,16 +14237,43 @@ index 3430107..913b9d0 100644
 +    s_ov.dirty = 1;
 +}
 +
++/* The next or previous tab, around; the title card has none. */
++static void ov_tab(int dir)
++{
++    if (s_launcher == LAUNCHER_CARD)
++        return;
++    s_ov.page = (s_ov.page + PG_COUNT + dir) % PG_COUNT;
++    s_ov.sel = 0;
++    s_ov.dirty = 1;
++}
++
++/* Which prompts the footer shows: the pad's buttons once the pad moves the
++ * menu, the keys once the keyboard or mouse does. */
++static void ov_prompts(int pad)
++{
++    if (s_ov.pad_prompts != pad) {
++        s_ov.pad_prompts = pad;
++        s_ov.dirty = 1;
++    }
++}
++
 +/* A key the window passed on (fb_wndproc). */
 +static void ov_key(HWND hwnd, int vk)
 +{
 +    if (vk == VK_F10) {
++        ov_prompts(0);
 +        ov_set_open(!s_ov_open);
 +        return;
 +    }
 +    if (!s_ov_open && !s_launcher)
 +        return;
++    ov_prompts(0);
 +    switch (vk) {
++    case 'Q':
++    case VK_PRIOR:  ov_tab(-1); break;
++    case 'E':
++    case VK_NEXT:   ov_tab(+1); break;
++    case VK_TAB:    ov_tab(GetKeyState(VK_SHIFT) < 0 ? -1 : +1); break;
 +    case VK_UP:     ov_move(-1); break;
 +    case VK_DOWN:   ov_move(+1); break;
 +    case VK_LEFT:   ov_change(hwnd, -1); break;
@@ -13548,13 +14286,28 @@ index 3430107..913b9d0 100644
 +}
 +
 +/* The mouse (fb_wndproc): over a row selects it; a click applies or changes
-+ * it, a right-click changes it the other way. */
++ * it, a right-click changes it the other way. Only a real move selects:
++ * Windows also sends a move when the window or the rows shift under a
++ * still pointer, which would take the selection from the keys or pad. */
 +static void ov_mouse(HWND hwnd, int x, int y, int button)
 +{
-+    POINT pt;
++    static POINT last = { -1, -1 };
++    POINT pt, screen;
 +    int i;
++    GetCursorPos(&screen);          /* on screen: the window may have moved */
++    if (!button && screen.x == last.x && screen.y == last.y)
++        return;
++    last = screen;
 +    pt.x = x;
 +    pt.y = y;
++    if (button)
++        ov_prompts(0);
++    for (i = 0; i < s_ov.ntab_hit; i++) {
++        if (button > 0 && PtInRect(&s_ov.tab_hit[i], pt) && i != s_ov.page) {
++            ov_tab(i - s_ov.page);
++            return;
++        }
++    }
 +    for (i = 0; i < s_ov.nhit; i++) {
 +        if (!PtInRect(&s_ov.hit[i], pt))
 +            continue;
@@ -13572,11 +14325,12 @@ index 3430107..913b9d0 100644
 +
 +/* The pad, read past the suspension. Back+Start opens or closes; in the
 + * menu the d-pad or left stick moves (repeating while held), A applies,
-+ * B or Start closes. On the launcher A or Start applies and B goes back. */
++ * B or Start closes, and the bumpers (White and Black on the Xbox pad)
++ * switch tabs. On the launcher A or Start applies and B goes back. */
 +static void ov_poll_pad(HWND hwnd)
 +{
 +    enum { UP = 1, DOWN = 2, LEFT = 4, RIGHT = 8, START = 0x10, BACK = 0x20,
-+           A = 0x100, B = 0x200 };
++           A = 0x100, B = 0x200, LB = 0x400, RB = 0x800 };
 +    static DWORD last_poll, held_since, last_repeat;
 +    static unsigned prev;
 +    XBOX_INPUT_STATE st;
@@ -13593,6 +14347,8 @@ index 3430107..913b9d0 100644
 +        b = g->wButtons & 0x3F;
 +        if (g->bAnalogButtons[XBOX_BUTTON_A] > 30) b |= A;
 +        if (g->bAnalogButtons[XBOX_BUTTON_B] > 30) b |= B;
++        if (g->bAnalogButtons[XBOX_BUTTON_WHITE] > 30) b |= LB;
++        if (g->bAnalogButtons[XBOX_BUTTON_BLACK] > 30) b |= RB;
 +        if (g->sThumbLY >  16000) b |= UP;
 +        if (g->sThumbLY < -16000) b |= DOWN;
 +        if (g->sThumbLX < -16000) b |= LEFT;
@@ -13622,10 +14378,13 @@ index 3430107..913b9d0 100644
 +        } else {
 +            held_since = now;
 +        }
++        if (pressed)         ov_prompts(1);
 +        if (pressed & UP)    ov_move(-1);
 +        if (pressed & DOWN)  ov_move(+1);
 +        if (pressed & LEFT)  ov_change(hwnd, -1);
 +        if (pressed & RIGHT) ov_change(hwnd, +1);
++        if (pressed & LB)    ov_tab(-1);
++        if (pressed & RB)    ov_tab(+1);
 +        if (s_launcher) {
 +            if (pressed & (A | START)) {
 +                /* Play: the title must not read this press as its own. */
@@ -13654,6 +14413,151 @@ index 3430107..913b9d0 100644
 +{
 +    SetTextColor(s_ov.dc, c);
 +    DrawTextA(s_ov.dc, s, -1, &r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
++}
++
++/* The menus' look, so each game's settings wear its own colours instead of
++ * one toolkit-wide style. The project gives an RCDATA resource RECOMP_THEME,
++ * text lines of "key = value" (';' starts a comment, and so does '#' at the
++ * start of a line):
++ *
++ *   accent  = #DC2828     bars, the selected tab's underline, the title text
++ *   panel   = #10121A     the panel's ground
++ *   side    = #000000     the logo column's ground
++ *   select  = #461E22     the selected row
++ *   text    = #BEC2CD     labels
++ *   dim     = #82869A     descriptions, prompts, tabs not selected
++ *   value   = #96C8FF     values
++ *   hot     = #FFD278     the selected row's value
++ *   font    = Segoe UI    labels and values
++ *   heading = Bahnschrift the title, tabs and the title card's menu
++ *   caps    = 1           the title and tabs in capitals
++ *
++ * Anything left out keeps the default. A project without the resource gets
++ * the defaults, which are the toolkit's look before themes. */
++static struct {
++    int      loaded;
++    COLORREF accent, panel, side, select, text, dim, value, hot;
++    char     font[LF_FACESIZE], heading[LF_FACESIZE];
++    int      caps;
++} s_th;
++
++static void theme_set(const char *key, const char *val)
++{
++    COLORREF *c = !strcmp(key, "accent") ? &s_th.accent : !strcmp(key, "panel") ? &s_th.panel
++                : !strcmp(key, "side") ? &s_th.side : !strcmp(key, "select") ? &s_th.select
++                : !strcmp(key, "text") ? &s_th.text : !strcmp(key, "dim") ? &s_th.dim
++                : !strcmp(key, "value") ? &s_th.value : !strcmp(key, "hot") ? &s_th.hot : NULL;
++    if (c) {
++        unsigned v;
++        if (val[0] == '#' && strlen(val) == 7 && sscanf(val + 1, "%6x", &v) == 1)
++            *c = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
++    } else if (!strcmp(key, "font")) {
++        snprintf(s_th.font, sizeof s_th.font, "%s", val);
++    } else if (!strcmp(key, "heading")) {
++        snprintf(s_th.heading, sizeof s_th.heading, "%s", val);
++    } else if (!strcmp(key, "caps")) {
++        s_th.caps = atoi(val) != 0;
++    }
++}
++
++static void theme_load(void)
++{
++    HRSRC res;
++    HGLOBAL mem;
++    const char *src;
++    char buf[2048], *line, *next;
++    DWORD size;
++
++    if (s_th.loaded)
++        return;
++    s_th.loaded = 1;
++    s_th.accent = RGB(220, 40, 40);
++    s_th.panel = RGB(16, 18, 26);
++    s_th.side = RGB(0, 0, 0);
++    s_th.select = RGB(70, 30, 34);
++    s_th.text = RGB(190, 194, 205);
++    s_th.dim = RGB(130, 134, 145);
++    s_th.value = RGB(150, 200, 255);
++    s_th.hot = RGB(255, 210, 120);
++    snprintf(s_th.font, sizeof s_th.font, "Segoe UI");
++    snprintf(s_th.heading, sizeof s_th.heading, "Segoe UI");
++
++    res = FindResourceA(NULL, "RECOMP_THEME", (LPCSTR)RT_RCDATA);
++    mem = res ? LoadResource(NULL, res) : NULL;
++    src = mem ? (const char *)LockResource(mem) : NULL;
++    size = res ? SizeofResource(NULL, res) : 0;
++    if (!src || !size)
++        return;
++    if (size >= sizeof buf)
++        size = sizeof buf - 1;
++    memcpy(buf, src, size);
++    buf[size] = 0;
++    for (line = buf; line; line = next) {
++        char *eq, *k, *v, *end;
++        next = strpbrk(line, "\r\n");
++        if (next)
++            *next++ = 0;
++        if ((end = strchr(line, ';')) != NULL)
++            *end = 0;
++        if (line[0] == '#' || !(eq = strchr(line, '=')))
++            continue;
++        *eq = 0;
++        for (k = line; *k == ' ' || *k == '\t'; k++)
++            ;
++        for (end = eq; end > k && (end[-1] == ' ' || end[-1] == '\t'); )
++            *--end = 0;
++        for (v = eq + 1; *v == ' ' || *v == '\t'; v++)
++            ;
++        for (end = v + strlen(v); end > v && (end[-1] == ' ' || end[-1] == '\t'); )
++            *--end = 0;
++        theme_set(k, v);
++    }
++    fprintf(stderr, "  [FBWIN] theme: font %s, heading %s\n", s_th.font, s_th.heading);
++}
++
++/* A heading as the theme writes it: in capitals when it asks for them. */
++static const char *th_heading(const char *s, char *buf, size_t n)
++{
++    size_t i;
++    if (!s_th.caps)
++        return s;
++    for (i = 0; s[i] && i + 1 < n; i++)
++        buf[i] = (char)toupper((unsigned char)s[i]);
++    buf[i] = 0;
++    return buf;
++}
++
++static void ov_line(int x0, int x1, int y, int thick, COLORREF c)
++{
++    RECT r;
++    SetRect(&r, x0, y, x1, y + (thick < 1 ? 1 : thick));
++    ov_fill(&r, c);
++}
++
++/* A key or button prompt: its name in an outlined cap, then what it does.
++ * Returns the x where the next one starts. */
++static int ov_prompt(int x, int y, int h, const char *key, const char *what)
++{
++    SIZE ks, ws;
++    RECT r;
++    int pad = h / 3;
++    HPEN pen, oldp;
++    HBRUSH oldb;
++
++    GetTextExtentPoint32A(s_ov.dc, key, (int)strlen(key), &ks);
++    GetTextExtentPoint32A(s_ov.dc, what, (int)strlen(what), &ws);
++    SetRect(&r, x, y, x + ks.cx + pad * 2, y + h);
++    pen = CreatePen(PS_SOLID, h > 30 ? 2 : 1, s_th.dim);
++    oldp = (HPEN)SelectObject(s_ov.dc, pen);
++    oldb = (HBRUSH)SelectObject(s_ov.dc, GetStockObject(NULL_BRUSH));
++    RoundRect(s_ov.dc, r.left, r.top, r.right, r.bottom, h / 2, h / 2);
++    SelectObject(s_ov.dc, oldb);
++    SelectObject(s_ov.dc, oldp);
++    DeleteObject(pen);
++    ov_text(key, r, DT_CENTER, s_th.text);
++    SetRect(&r, r.right + pad, y, r.right + pad + ws.cx, y + h);
++    ov_text(what, r, DT_LEFT, s_th.dim);
++    return r.right + h;
 +}
 +
 +/* The project's art: RCDATA resources in the exe (PNGs, decoded with WIC),
@@ -13802,19 +14706,10 @@ index 3430107..913b9d0 100644
 +
 +/* Draw art into a box, as large as fits with its shape kept, centred. */
 +static void art_draw(const Art *art, const RECT *box)
- {
--    static LONG lw, lh;
--    RECT c;
--    LONG cw, ch, w, h;
--    GetClientRect(hwnd, &c);
--    cw = c.right - c.left; ch = c.bottom - c.top;
--    if (cw <= 0 || ch <= 0)
++{
 +    int bw = box->right - box->left, bh = box->bottom - box->top, dw, dh;
 +    if (!art->dc || bw < 1 || bh < 1)
-         return;
--    if (cw != lw || ch != lh) {
--        FillRect(hdc, &c, (HBRUSH)GetStockObject(BLACK_BRUSH));
--        lw = cw; lh = ch;
++        return;
 +    dw = bw;
 +    dh = (int)((long long)art->h * bw / art->w);
 +    if (dh > bh) {
@@ -13827,11 +14722,16 @@ index 3430107..913b9d0 100644
 +               art->dc, 0, 0, art->w, art->h, SRCCOPY);
 +}
 +
-+static HFONT ui_font(int px, int weight)
++static HFONT ui_font_face(const char *face, int px, int weight)
 +{
 +    return CreateFontA(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
 +                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-+                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
++                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
++}
++
++static HFONT ui_font(int px, int weight)
++{
++    return ui_font_face(s_th.font, px, weight);
 +}
 +
 +/* The launcher's title card: the wordmark, the menu under it, the version
@@ -13848,7 +14748,7 @@ index 3430107..913b9d0 100644
 +    if (fh > 44) fh = 44;
 +    if (fh < 14) fh = 14;
 +    row = fh * 2;
-+    big = ui_font(fh, FW_SEMIBOLD);
++    big = ui_font_face(s_th.heading, fh, FW_SEMIBOLD);
 +    fine = ui_font(fh * 3 / 5 < 11 ? 11 : fh * 3 / 5, FW_NORMAL);
 +    oldf = (HFONT)SelectObject(s_ov.dc, big);
 +
@@ -13858,33 +14758,45 @@ index 3430107..913b9d0 100644
 +    if (s_card.dc)
 +        art_draw(&s_card, &r);
 +    else
-+        ov_text(s_cfg.title, r, DT_CENTER, RGB(220, 40, 40));
++        ov_text(s_cfg.title, r, DT_CENTER, s_th.accent);
 +
 +    menu_w = fh * 12;
 +    top = ch * 52 / 100;
 +    s_ov.nhit = 0;
++    s_ov.ntab_hit = 0;
 +    for (i = 0; i < n; i++) {
 +        const char *label;
-+        char value[48];
++        char value[48], caps[48];
 +        int sel = i == s_ov.sel;
 +        SetRect(&r, (cw - menu_w) / 2, top + row * i, (cw + menu_w) / 2, top + row * i + row * 4 / 5);
 +        if (sel) {
 +            RECT bar;
-+            ov_fill(&r, RGB(70, 30, 34));
++            ov_fill(&r, s_th.select);
 +            SetRect(&bar, r.left, r.top, r.left + fh / 6, r.bottom);
-+            ov_fill(&bar, RGB(220, 40, 40));
++            ov_fill(&bar, s_th.accent);
 +        }
 +        ov_item(rows[i], &label, value, sizeof value);
-+        ov_text(label, r, DT_CENTER, sel ? RGB(255, 255, 255) : RGB(150, 154, 165));
++        ov_text(th_heading(label, caps, sizeof caps), r, DT_CENTER,
++                sel ? RGB(255, 255, 255) : s_th.dim);
 +        s_ov.hit[s_ov.nhit++] = r;
 +    }
 +
 +    SelectObject(s_ov.dc, fine);
 +    SetRect(&r, fh, ch - fh * 2, cw / 2, ch - fh / 2);
-+    ov_text(s_launcher_version, r, DT_LEFT, RGB(110, 114, 125));
-+    SetRect(&r, cw / 4, ch - fh * 2, cw - cw / 4, ch - fh / 2);
-+    ov_text("Enter / A: select     Arrows / D-pad: move",
-+            r, DT_CENTER | DT_END_ELLIPSIS, RGB(110, 114, 125));
++    ov_text(s_launcher_version, r, DT_LEFT, s_th.dim);
++    {
++        int ph = fh * 9 / 10, x;
++        SIZE sz;
++        const char *k1 = s_ov.pad_prompts ? "A" : "Enter";
++        const char *k2 = s_ov.pad_prompts ? "D-pad" : "Up/Down";
++        int w1, w2;
++        GetTextExtentPoint32A(s_ov.dc, k1, (int)strlen(k1), &sz); w1 = sz.cx;
++        GetTextExtentPoint32A(s_ov.dc, k2, (int)strlen(k2), &sz); w2 = sz.cx;
++        GetTextExtentPoint32A(s_ov.dc, "SelectMove", 10, &sz);
++        x = (cw - (w1 + w2 + sz.cx + ph * 4)) / 2;   /* centred: ov_prompt's spacing */
++        x = ov_prompt(x, ch - fh * 2 + (fh * 3 / 2 - ph) / 2, ph, k1, "Select");
++        ov_prompt(x, ch - fh * 2 + (fh * 3 / 2 - ph) / 2, ph, k2, "Move");
++    }
 +    if (s_mark.dc) {
 +        int mh = ch / 9;
 +        SetRect(&r, cw - fh - mh * 3, ch - fh / 2 - mh, cw - fh, ch - fh / 2);
@@ -13938,19 +14850,19 @@ index 3430107..913b9d0 100644
 +        s_ov.sel = n - 1;
 +
 +    /* Text size: whatever lets the whole panel fit -- 1.5 text heights a
-+     * row, three rows of title and footer, and a margin; 26 wide for the
-+     * menu plus 17 for the logo column -- capped at 22 px, which reads well
-+     * at 1280x960 and above. */
++     * row for the tallest tab, about 10 for the title, tabs, description
++     * and footer, and a margin; 32 wide for the menu plus 15 for the logo
++     * column -- and no more than a 36th of the window's height, so it grows
++     * with the window the way a game's own menus do. */
++    theme_load();
 +    logo_load();
 +    {
-+        int across = 26 + (s_logo.dc ? 17 : 0) + 2;
-+        int by_h = ch * 2 / (3 * (n + 3) + 4), by_w = cw / across;
++        int across = 32 + (s_logo.dc ? 15 : 0) + 2;
++        int by_h = ch * 2 / (3 * ov_max_rows() + 24), by_w = cw / across;
 +        fh = by_h < by_w ? by_h : by_w;
-+        if (fh > 22) fh = 22;
++        if (fh > ch / 36) fh = ch / 36;
 +        if (fh < 10) fh = 10;
-     }
--    if ((long long)cw * s_fb_height <= (long long)ch * s_fb_width) {
--        w = cw; h = (LONG)((long long)cw * s_fb_height / s_fb_width);
++    }
 +    font = ui_font(fh, FW_NORMAL);
 +    bold = ui_font(fh * 5 / 4, FW_BOLD);
 +    oldf = (HFONT)SelectObject(s_ov.dc, font);
@@ -13972,64 +14884,125 @@ index 3430107..913b9d0 100644
 +    }
 +
 +    if (s_ov_open || s_launcher == LAUNCHER_SETTINGS) {
-+        int row = fh * 3 / 2, pad = fh, lw = s_logo.dc ? fh * 17 : 0;
-+        int pw = fh * 26 + lw, ph, i, ml;
++        int row = fh * 3 / 2, pad = fh, lw = s_logo.dc ? fh * 15 : 0;
++        int pw = fh * 32 + lw, ph, i, ml, top, tab_y, tab_h = fh * 2, help_h = fh * 5 / 2;
++        int nmax = ov_max_rows(), bar = fh / 5 < 2 ? 2 : fh / 5;
++        char caps[96];
++        HFONT tabf = ui_font_face(s_th.heading, fh, FW_SEMIBOLD);
++        HFONT finef = ui_font(fh * 7 / 8, FW_NORMAL);
 +        RECT p, r;
 +        if (pw > cw - fh) pw = cw - fh;
-+        ph = row * (n + 3) + pad;
++        ph = bar + row * 3 / 2 + tab_h + pad / 2 + row * nmax + pad / 2 + help_h + row * 3 / 2;
 +        SetRect(&p, (cw - pw) / 2, (ch - ph) / 2, (cw + pw) / 2, (ch - ph) / 2 + ph);
-+        ov_fill(&p, RGB(16, 18, 26));
++        ov_fill(&p, s_th.panel);
 +
-+        /* The logo, on black like the art itself, scaled to its column. */
++        /* The logo, on its own ground like the art itself, scaled to its column. */
 +        if (lw) {
 +            RECT box;
 +            SetRect(&r, p.left, p.top, p.left + lw, p.bottom);
-+            ov_fill(&r, RGB(0, 0, 0));
++            ov_fill(&r, s_th.side);
 +            SetRect(&box, r.left + pad, r.top + pad, r.right - pad, r.bottom - pad);
 +            art_draw(&s_logo, &box);
 +        }
 +        ml = p.left + lw;                               /* the menu's left edge */
-+        SetRect(&r, p.left, p.top, p.right, p.top + fh / 5);
-+        ov_fill(&r, RGB(220, 40, 40));                       /* accent */
++        SetRect(&r, p.left, p.top, p.right, p.top + bar);
++        ov_fill(&r, s_th.accent);
 +
 +        SelectObject(s_ov.dc, bold);
-+        SetRect(&r, ml + pad, p.top + fh / 5, p.right - pad, p.top + row * 3 / 2);
++        SetRect(&r, ml + pad, p.top + bar, p.right - pad, p.top + bar + row * 3 / 2);
 +        {
 +            char t[96];
 +            if (lw)                                     /* the logo names it */
 +                snprintf(t, sizeof t, "Settings");
 +            else
 +                snprintf(t, sizeof t, "%s settings", s_cfg.title);
-+            ov_text(t, r, DT_LEFT, RGB(255, 255, 255));
++            ov_text(th_heading(t, caps, sizeof caps), r, DT_LEFT, RGB(255, 255, 255));
 +        }
++
++        /* The tabs, each as wide as its name, the current one underlined;
++         * the bumpers or Q/E that switch them are shown at the ends. */
++        tab_y = p.top + bar + row * 3 / 2;
++        SelectObject(s_ov.dc, tabf);
++        {
++            int x = ml + pad;
++            s_ov.ntab_hit = 0;
++            for (i = 0; i < PG_COUNT; i++) {
++                const char *name = th_heading(s_page_names[i], caps, sizeof caps);
++                SIZE sz;
++                int cur = i == s_ov.page;
++                GetTextExtentPoint32A(s_ov.dc, name, (int)strlen(name), &sz);
++                SetRect(&r, x, tab_y, x + sz.cx + pad, tab_y + tab_h);
++                if (cur)
++                    ov_line(r.left, r.right, r.bottom - bar, bar, s_th.accent);
++                ov_text(name, r, DT_CENTER, cur ? RGB(255, 255, 255) : s_th.dim);
++                s_ov.tab_hit[s_ov.ntab_hit++] = r;
++                x = r.right + pad / 2;
++            }
++            SelectObject(s_ov.dc, finef);
++            SetRect(&r, x, tab_y, p.right - pad, tab_y + tab_h);
++            ov_text(s_ov.pad_prompts ? "LB / RB" : "Q / E", r, DT_RIGHT, s_th.dim);
++        }
++        ov_line(ml + pad, p.right - pad, tab_y + tab_h, 1, s_th.dim);
 +        SelectObject(s_ov.dc, font);
 +
++        top = tab_y + tab_h + pad / 2;
 +        for (i = 0; i < n; i++) {
 +            const char *label;
 +            char value[48], shown[64];
 +            int sel = i == s_ov.sel;
-+            SetRect(&r, ml + pad / 2, p.top + row * 3 / 2 + row * i,
-+                    p.right - pad / 2, p.top + row * 3 / 2 + row * (i + 1));
++            SetRect(&r, ml + pad / 2, top + row * i, p.right - pad / 2, top + row * (i + 1));
 +            s_ov.hit[s_ov.nhit++] = r;
-+            if (sel)
-+                ov_fill(&r, RGB(70, 30, 34));
++            if (sel) {
++                RECT edge;
++                ov_fill(&r, s_th.select);
++                SetRect(&edge, r.left, r.top, r.left + bar, r.bottom);
++                ov_fill(&edge, s_th.accent);
++            }
 +            ov_item(rows[i], &label, value, sizeof value);
 +            r.left += pad / 2; r.right -= pad / 2;
 +            ov_text(label, r, DT_LEFT, sel ? RGB(255, 255, 255)
-+                    : rows[i] == OV_RESTART ? RGB(255, 210, 120) : RGB(190, 194, 205));
++                    : rows[i] == OV_RESTART ? s_th.hot : s_th.text);
 +            if (value[0]) {
 +                snprintf(shown, sizeof shown, sel ? "<  %s  >" : "%s", value);
-+                ov_text(shown, r, DT_RIGHT, sel ? RGB(255, 210, 120) : RGB(150, 200, 255));
++                ov_text(shown, r, DT_RIGHT, sel ? s_th.hot : s_th.value);
 +            }
 +        }
 +
-+        SetRect(&r, ml + pad, p.bottom - row * 3 / 2, p.right - pad, p.bottom - pad / 3);
-+        if ((LONG)(s_ov.status_until - GetTickCount()) > 0)
++        /* The selected row's description, under the tallest tab's rows so
++         * it stays put between tabs. */
++        top += row * nmax + pad / 2;
++        ov_line(ml + pad, p.right - pad, top, 1, s_th.dim);
++        SelectObject(s_ov.dc, finef);
++        {
++            const char *help = n ? ov_help(rows[s_ov.sel]) : NULL;
++            if (help) {
++                SetRect(&r, ml + pad, top + pad / 3, p.right - pad, top + help_h);
++                SetTextColor(s_ov.dc, s_th.dim);
++                DrawTextA(s_ov.dc, help, -1, &r, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
++            }
++        }
++
++        /* The footer: a status line for a few seconds, else the prompts. */
++        top += help_h;
++        if ((LONG)(s_ov.status_until - GetTickCount()) > 0) {
++            SetRect(&r, ml + pad, top, p.right - pad, p.bottom - pad / 3);
 +            ov_text(s_ov.status, r, DT_LEFT | DT_END_ELLIPSIS, RGB(140, 255, 140));
-+        else
-+            ov_text(s_launcher ? "Arrows/D-pad: move   Enter/A: change   Esc/B: back"
-+                               : "Arrows/D-pad: move   Enter/A: apply   Esc/B: close",
-+                    r, DT_LEFT | DT_END_ELLIPSIS, RGB(130, 134, 145));
++        } else {
++            int h = fh * 6 / 5, y = top + (p.bottom - top - h) / 2, x = ml + pad;
++            const char *back = s_launcher ? "Back" : "Close";
++            if (s_ov.pad_prompts) {
++                x = ov_prompt(x, y, h, "A", "Select");
++                x = ov_prompt(x, y, h, "D-pad", "Change");
++                ov_prompt(x, y, h, "B", back);
++            } else {
++                x = ov_prompt(x, y, h, "Enter", "Select");
++                x = ov_prompt(x, y, h, "Left/Right", "Change");
++                ov_prompt(x, y, h, "Esc", back);
++            }
++        }
++        SelectObject(s_ov.dc, font);
++        DeleteObject(tabf);
++        DeleteObject(finef);
 +        s_ov.rects[s_ov.nrects++] = p;
 +    }
 +    GdiFlush();
@@ -14042,6 +15015,12 @@ index 3430107..913b9d0 100644
 +    if (s_launcher) {
 +        for (k = 0; k < cw * ch; k++)
 +            s_ov.bits[k] |= 0xFF000000u;
++    } else if (s_ov_open) {
++        /* The game dimmed behind the open menu, as a pause screen would;
++         * the boxes take their own opacity below. The GDI presenter copies
++         * only the boxes, so there the game shows undimmed. */
++        for (k = 0; k < cw * ch; k++)
++            s_ov.bits[k] |= 0x99000000u;
 +    }
 +    for (k = 0; !s_launcher && k < s_ov.nrects; k++) {
 +        const RECT *r = &s_ov.rects[k];
@@ -14709,8 +15688,7 @@ index 3430107..913b9d0 100644
 +        for (l = 1; l < FG_LEVELS; l++)
 +            fg_pass(fg.ps_lumd, fg.slot[i].lrtv[l], fg.lw[l], fg.lh[l],
 +                    NULL, NULL, NULL, fg.slot[i].lsrv[l - 1], NULL, 0, 0, 0);
-     } else {
--        h = ch; w = (LONG)((long long)ch * s_fb_width / s_fb_height);
++    } else {
 +        fg.slot[i].seq = -seq;       /* no luma: not for motion */
 +    }
 +}
@@ -15062,11 +16040,7 @@ index 3430107..913b9d0 100644
 +            srv = made;
 +            s_fg_shown = 1;
 +        }
-     }
--    SetStretchBltMode(hdc, HALFTONE);
--    SetBrushOrgEx(hdc, 0, 0, NULL);     /* HALFTONE wants it after the mode */
--    StretchDIBits(hdc, (cw - w) / 2, (ch - h) / 2, w, h,
--                  0, 0, (int)s_fb_width, (int)s_fb_height,
++    }
 +    src_w = gpu ? (float)d3d.g_w : (float)s_fb_width;
 +    src_h = gpu ? (float)d3d.g_h : (float)s_fb_height;
 +
@@ -15185,7 +16159,7 @@ index 3430107..913b9d0 100644
 +                                                         : HALFTONE);
 +    SetBrushOrgEx(hdc, 0, 0, NULL);
 +    StretchDIBits(hdc, x, y, w, h, 0, 0, (int)s_fb_width, (int)s_fb_height,
-                   s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
++                  s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
 +    /* The overlay's boxes, opaque: GDI has no per-pixel blend worth it. */
 +    if (ov_visible()) {
 +        int k;
@@ -15196,18 +16170,11 @@ index 3430107..913b9d0 100644
 +                   s_ov.dc, r->left, r->top, SRCCOPY);
 +        }
 +    }
- }
- 
--/* The converted frame in s_rgb, on screen: D3D11 when it is up (which waits
-- * for vsync, so returns 1 when the loop is already paced), else GDI. */
--static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
++}
++
 +/* F12: the frame on screen, at the console's resolution. */
 +static void take_screenshot(void)
- {
--    if (gpu_present_active())
--        return gpu_present_frame(s_rgb);
--    gdi_blit(hwnd, hdc, bi);
--    return 0;
++{
 +    char path[MAX_PATH];
 +    SYSTEMTIME t;
 +
@@ -15225,104 +16192,79 @@ index 3430107..913b9d0 100644
 +        snprintf(s_notice, sizeof s_notice, "Screenshot saved: %s", path);
 +    }
 +    s_notice_until = GetTickCount() + 3000;
- }
- 
- static DWORD WINAPI fb_thread(LPVOID unused)
-@@ -477,11 +2848,16 @@ static DWORD WINAPI fb_thread(LPVOID unused)
-     HWND hwnd;
-     HDC hdc;
-     BITMAPINFO bi;
--    RECT r;
--    int fb_pinned;
++}
++
++static DWORD WINAPI fb_thread(LPVOID unused)
++{
++    HWND hwnd;
++    HDC hdc;
++    BITMAPINFO bi;
 +    RECT r, wa;
 +    int use_d3d;
 +    LONG last_flips = -1;
 +    uint32_t last_pvideo = 0;
 +    DWORD last_draw = 0;
 +    int need_resize = 0;
- 
-     (void)unused;
- 
++
++    (void)unused;
++
++    dpi_aware();
 +    cfg_load_once();
-     {
-         WNDCLASSA wc;
-         memset(&wc, 0, sizeof(wc));
-@@ -491,43 +2867,31 @@ static DWORD WINAPI fb_thread(LPVOID unused)
-         wc.lpszClassName = "XboxRecompFramebuffer";
-         RegisterClassA(&wc);
-     }
-+    /* window_scale times the frame, shrunk by whole steps to fit the work
-+     * area so the title bar stays on screen. */
-     {
--        /* RECOMP_WINDOW_SCALE (1-8, default 2, as in the SDL window): the
--         * client area is the frame times this, made smaller until the window
--         * fits the desktop work area, and centred on it. */
--        const char *e = getenv("RECOMP_WINDOW_SCALE");
--        int scale = e ? atoi(e) : 2;
--        RECT work;
--        if (scale < 1 || scale > 8)
--            scale = 2;
--        if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
--            work.left = work.top = 0; work.right = 1920; work.bottom = 1080;
--        }
--        for (;; scale--) {
-+        int k = s_cfg.window_scale;
-+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-+        for (;;) {
-             r.left = 0; r.top = 0;
--            r.right = (LONG)s_fb_width * scale; r.bottom = (LONG)s_fb_height * scale;
-+            r.right = (LONG)display_width() * k; r.bottom = (LONG)s_fb_height * k;
-             AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
--            if (scale <= 1 || (r.right - r.left <= work.right - work.left
--                               && r.bottom - r.top <= work.bottom - work.top))
-+            if (k == 1 || (r.right - r.left <= wa.right - wa.left
-+                           && r.bottom - r.top <= wa.bottom - wa.top))
-                 break;
-+            k--;
-         }
--        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
--                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
--                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
--                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
--                               r.right - r.left, r.bottom - r.top,
--                               NULL, NULL, GetModuleHandleA(NULL), NULL);
-     }
++    {
++        WNDCLASSA wc;
++        memset(&wc, 0, sizeof(wc));
++        wc.lpfnWndProc   = fb_wndproc;
++        wc.hInstance     = GetModuleHandleA(NULL);
++        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
++        /* The project's icon (an ICON resource RECOMP_ICON) on the title bar
++         * and taskbar, where the exe has one. */
++        wc.hIcon         = LoadIconA(wc.hInstance, "RECOMP_ICON");
++        wc.lpszClassName = "XboxRecompFramebuffer";
++        RegisterClassA(&wc);
++    }
++    /* window_scale times the frame, shrunk by whole steps to fit the
++     * primary's work area so the title bar stays on screen. */
++    SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
++    window_size(&wa, window_dpi(NULL), &r);
 +    hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", s_cfg.title,
 +                           WS_OVERLAPPEDWINDOW | WS_VISIBLE,
 +                           CW_USEDEFAULT, CW_USEDEFAULT,
 +                           r.right - r.left, r.bottom - r.top,
 +                           NULL, NULL, GetModuleHandleA(NULL), NULL);
-     if (!hwnd) {
-         InterlockedExchange(&s_fb_running, 0);
-         return 0;
-     }
-     hdc = GetDC(hwnd);
--    {
--        const char *fs = getenv("RECOMP_FULLSCREEN");
--        if (fs && *fs && *fs != '0')
--            fb_toggle_fullscreen(hwnd);
--    }
- 
-     memset(&bi, 0, sizeof(bi));
-     bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -538,42 +2902,102 @@ static DWORD WINAPI fb_thread(LPVOID unused)
-     bi.bmiHeader.biCompression = BI_RGB;
- 
-     s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
--    /* A window pinned to one address shows that memory and nothing else. */
--    fb_pinned = getenv("RECOMP_FB_VA") != NULL;
- 
--    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
--            s_fb_width, s_fb_height);
--    if (gpu_present_enabled())
--        gpu_present_init(hwnd, s_fb_width, s_fb_height);
++    if (!hwnd) {
++        InterlockedExchange(&s_fb_running, 0);
++        return 0;
++    }
++    hdc = GetDC(hwnd);
++
++    memset(&bi, 0, sizeof(bi));
++    bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
++    bi.bmiHeader.biWidth       = (LONG)s_fb_width;
++    bi.bmiHeader.biHeight      = -(LONG)s_fb_height;   /* top-down */
++    bi.bmiHeader.biPlanes      = 1;
++    bi.bmiHeader.biBitCount    = 32;
++    bi.bmiHeader.biCompression = BI_RGB;
++
++    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
++
 +    use_d3d = !s_cfg.gdi && d3d_init(hwnd);
 +    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u, %s%s)\n",
 +            s_fb_width, s_fb_height,
 +            use_d3d ? "d3d11" : "gdi",
 +            use_d3d ? (d3d.tearing ? ", tearing ok" : "") : "");
-+    if (s_cfg.fullscreen)
-+        toggle_fullscreen(hwnd);
++    /* The saved display mode on the saved monitor. A window on the primary
++     * stays where Windows put it. */
++    mon_enum();
++    s_disp.mode = MODE_WINDOWED;
++    s_disp.last_full = s_cfg.mode == MODE_FULLSCREEN ? MODE_FULLSCREEN : MODE_BORDERLESS;
++    s_disp.full_w = s_cfg.res_w;
++    s_disp.full_h = s_cfg.res_h;
++    {
++        int mi = mon_find(s_cfg.monitor);
++        snprintf(s_disp.dev, sizeof s_disp.dev, "%s", s_disp.nmons ? s_disp.mons[mi].dev : "");
++        if (s_cfg.mode != MODE_WINDOWED || (s_disp.nmons && !s_disp.mons[mi].primary))
++            display_apply(hwnd, s_cfg.mode, s_disp.dev);
++    }
 +    xbox_InputSetRumble(s_cfg.rumble);
 +    xbox_InputSetDeadZone(s_cfg.deadzone);
  
@@ -15336,7 +16278,12 @@ index 3430107..913b9d0 100644
          }
 +        if (InterlockedExchange(&s_want_fullscreen_toggle, 0)) {
 +            toggle_fullscreen(hwnd);
-+            s_ov.dirty = 1;                     /* its Fullscreen line */
++            s_ov.dirty = 1;                     /* its Display mode line */
++        }
++        if (InterlockedExchange(&s_want_display_reapply, 0) && s_disp.away) {
++            s_disp.away = 0;                    /* back from Alt+Tab */
++            ShowWindow(hwnd, SW_RESTORE);
++            display_apply(hwnd, MODE_FULLSCREEN, s_disp.dev);
 +        }
 +        {
 +            LONG k = InterlockedExchange(&s_ov_key, 0);
@@ -15378,7 +16325,7 @@ index 3430107..913b9d0 100644
 +            /* The launcher, or black from Play until the title's first
 +             * frame (s_rgb starts zeroed). */
 +            have = 1;
-         }
++        }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
 +        xbox_PvideoTrace();
@@ -15417,13 +16364,13 @@ index 3430107..913b9d0 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
-+        }
+         }
 +        if (!use_d3d || !(s_cfg.vsync || (fg_on && s_fg_shown)) || !(have && fresh))
 +            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -584,45 +3008,94 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -584,45 +3918,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -15513,6 +16460,7 @@ index 3430107..913b9d0 100644
      }
  
 -    gpu_present_shutdown();
++    display_release();
 +    if (use_d3d) {
 +        if (s_is_fullscreen)
 +            toggle_fullscreen(hwnd);
@@ -15538,7 +16486,7 @@ index 3430107..913b9d0 100644
      return 0;
  }
  
-@@ -630,7 +3103,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -630,7 +4014,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -15547,7 +16495,7 @@ index 3430107..913b9d0 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -641,4 +3114,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -641,4 +4025,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  

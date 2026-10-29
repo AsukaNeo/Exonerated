@@ -4,7 +4,40 @@
  * settings overlay (xboxrecomp src/video/fb_present.c).
  * RECOMP_TITLE_CARD: the wordmark on the launcher's title card.
  * RECOMP_TITLE_MARK: the author's mark, in a corner of the title card.
+ * RECOMP_THEME: the settings menu's colours and fonts.
+ * RECOMP_ICON: the exe's icon, also on the window and taskbar.
  * Embedded so a packaged build needs no assets folder beside it. */
+#include <winver.h>
+
+RECOMP_ICON ICON "@DR_ICON@"
 RECOMP_OVERLAY_LOGO RCDATA "@DR_OVERLAY_LOGO@"
 RECOMP_TITLE_CARD RCDATA "@DR_TITLE_CARD@"
 RECOMP_TITLE_MARK RCDATA "@DR_TITLE_MARK@"
+RECOMP_THEME RCDATA "@DR_THEME@"
+
+/* What Explorer shows under Properties > Details. */
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     @DR_VERSION_RC@
+PRODUCTVERSION  @DR_VERSION_RC@
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "AsukaNeo"
+            VALUE "FileDescription",  "Exonerated - Deathrow for Windows"
+            VALUE "FileVersion",      "@DR_VERSION@"
+            VALUE "InternalName",     "Exonerated"
+            VALUE "LegalCopyright",   "Exonerated is MIT licensed. Deathrow belongs to its rights holders."
+            VALUE "OriginalFilename", "Exonerated.exe"
+            VALUE "ProductName",      "Exonerated"
+            VALUE "ProductVersion",   "@DR_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
