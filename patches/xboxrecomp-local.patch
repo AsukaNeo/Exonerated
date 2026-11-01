@@ -380,6 +380,43 @@ index 3ec56ca..148c44a 100644
              d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                 NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
  
+diff --git a/src/apu/apu_xaudio2.c b/src/apu/apu_xaudio2.c
+index e725646..037f948 100644
+--- a/src/apu/apu_xaudio2.c
++++ b/src/apu/apu_xaudio2.c
+@@ -66,6 +66,7 @@ static unsigned  g_xa2_underruns;
+ static int       g_xa2_dry;
+ static ULONGLONG g_xa2_underrun_logged;
+ static int                     g_xa2_initialized = 0;
++static float                   g_xa2_volume = 1.0f;  /* xa2_set_volume */
+ static int                     g_xa2_frames_written = 0;
+ 
+ int xa2_init(void)
+@@ -101,6 +102,7 @@ int xa2_init(void)
+         fprintf(stderr, "[XA2] CreateMasteringVoice failed: 0x%08lX\n", hr);
+         goto fail;
+     }
++    g_xa2_master->lpVtbl->SetVolume(g_xa2_master, g_xa2_volume, XAUDIO2_COMMIT_NOW);
+ 
+     wfx.wFormatTag      = WAVE_FORMAT_PCM;
+     wfx.nChannels       = XA2_CHANNELS;
+@@ -167,6 +169,16 @@ int xa2_is_active(void)
+     return g_xa2_initialized;
+ }
+ 
++/* The volume of everything the game plays, 0 (silent) to 1: the window's
++ * pause on focus loss (src/video/fb_present.c). One set before the device
++ * is up applies once it is (xa2_init). */
++void xa2_set_volume(float volume)
++{
++    g_xa2_volume = volume;
++    if (g_xa2_master)
++        g_xa2_master->lpVtbl->SetVolume(g_xa2_master, volume, XAUDIO2_COMMIT_NOW);
++}
++
+ /* Hand mixed samples to XAudio2. Called from the APU frame thread with one
+  * EP period (256 samples) at a time. Samples accumulate in the current device
+  * buffer, which is submitted when full, so a call shorter than a buffer is
 diff --git a/src/d3d/nv2a_shader_cpu.h b/src/d3d/nv2a_shader_cpu.h
 new file mode 100644
 index 0000000..17829bd
@@ -12454,7 +12491,7 @@ index 331d2e2..ce3fdbe 100644
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 3430107..7522e87 100644
+index 3430107..ea553d4 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -7,28 +7,89 @@
@@ -12558,7 +12595,7 @@ index 3430107..7522e87 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -38,15 +99,17 @@
+@@ -38,15 +99,18 @@
   * is the thing that receives the keys, so that is what has to remember
   * them. */
  #include "keyboard.h"   /* src/input */
@@ -12577,10 +12614,11 @@ index 3430107..7522e87 100644
 + * zeroed the presenter state while the old thread was still releasing it --
 + * a null read in d3d_make_rtv (pa6). */
 +static volatile LONG s_fb_closed;
++static volatile LONG s_focus_paused;   /* see focus_pause_update */
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -64,68 +127,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -64,68 +128,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -12695,7 +12733,16 @@ index 3430107..7522e87 100644
  }
  
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
-@@ -197,6 +244,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -160,6 +208,8 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+ 
+     if (!s_fb_running || !fb_va || !pitch)
+         return;
++    while (s_focus_paused && s_fb_running)
++        Sleep(15);                    /* paused in the background */
+     if (getenv("RECOMP_FB_VA"))
+         return;                       /* pinned: leave the old path alone */
+     next = (s_present_idx == 0) ? 1 : 0;
+@@ -197,6 +247,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
@@ -12703,7 +12750,7 @@ index 3430107..7522e87 100644
      InterlockedExchange(&s_present_idx, next);
  }
  
-@@ -222,68 +270,726 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+@@ -222,68 +273,748 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12743,6 +12790,7 @@ index 3430107..7522e87 100644
 +    char monitor[32];       /* its device name, \\.\DISPLAY2; "" the primary */
 +    int  res_w, res_h;      /* Fullscreen's resolution, 0x0 the desktop's */
 +    int  rumble, deadzone;  /* [input]; applied to the input layer at start */
++    int  focus_pause;       /* the game and its sound wait while the window is in the background */
 +    int  gpu;               /* the GPU back end draws (RECOMP_PB_BACKEND=d3d11) */
 +    int  render_scale;      /* GPU back end target size, x the guest's; read at start */
 +    int  widescreen;        /* the title is told 16:9 and the frame shown 16:9; at start */
@@ -12928,6 +12976,7 @@ index 3430107..7522e87 100644
 +    cfg_str("RECOMP_WINDOW_TITLE", "title", RECOMP_APP_NAME,
 +            s_cfg.title, sizeof s_cfg.title);
 +    s_cfg.fps_counter = cfg_int("RECOMP_FPS_COUNTER", "fps_counter", 0) != 0;
++    s_cfg.focus_pause = cfg_int("RECOMP_FOCUS_PAUSE", "pause_on_focus_loss", 1) != 0;
 +    s_cfg.rumble = cfg_int_in("input", "RECOMP_RUMBLE", "rumble", 1) != 0;
 +    s_cfg.deadzone = cfg_int_in("input", "RECOMP_PAD_DEADZONE", "deadzone", 0);
 +    s_cfg.render_scale = cfg_int("RECOMP_RENDER_SCALE", "render_scale", 1);
@@ -13393,6 +13442,24 @@ index 3430107..7522e87 100644
 +    display_apply(h, s_disp.mode == MODE_WINDOWED ? s_disp.last_full : MODE_WINDOWED, s_disp.dev);
 +}
 +
++/* Pause on focus loss: while the window is in the background or minimised
++ * the GPU thread waits at the game's next flip (xbox_FramebufferWindowPresent),
++ * so the game waits there too, as it would for a busy GPU, and the sound is
++ * silenced. Not on the launcher, where no game runs yet. */
++static int           s_active = 1;      /* the window has the focus */
++
++extern void xa2_set_volume(float volume);   /* src/apu/apu_xaudio2.c */
++
++static void focus_pause_update(void)
++{
++    LONG pause = s_cfg.focus_pause && !s_active && !s_launcher;
++    if (InterlockedExchange(&s_focus_paused, pause) != pause) {
++        xa2_set_volume(pause ? 0.0f : 1.0f);
++        fprintf(stderr, "  [FBWIN] %s\n", pause ? "paused: window in the background"
++                                                  : "resumed");
++    }
++}
++
 +static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 +{
      switch (m) {
@@ -13428,22 +13495,24 @@ index 3430107..7522e87 100644
 +            const RECT *r = (const RECT *)l;
 +            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
 +                         SWP_NOZORDER | SWP_NOACTIVATE);
-         }
-         return 0;
- 
++        }
++        return 0;
++
 +    /* Fullscreen at a resolution of its own: Alt+Tab gives the desktop back
 +     * and minimises; coming back switches again (in the window loop, out of
 +     * this message). */
 +    case WM_ACTIVATEAPP:
++        s_active = w != 0;
++        focus_pause_update();
 +        if (!w && s_disp.mode == MODE_FULLSCREEN && s_disp.switched[0]) {
 +            display_release();
 +            s_disp.away = 1;
 +            ShowWindow(h, SW_MINIMIZE);
 +        } else if (w && s_disp.away) {
 +            InterlockedExchange(&s_want_display_reapply, 1);
-+        }
-+        return 0;
-+
+         }
+         return 0;
+ 
 +    case WM_ERASEBKGND:
 +        return 1;                       /* every pixel is drawn each frame */
 +
@@ -13475,7 +13544,7 @@ index 3430107..7522e87 100644
          xbox_InputKeySet((int)w, 1);
          /* A Shift, Ctrl or Alt is also its side's key, for bindings to
           * "lshift" and the like; wParam stays the either-side one. */
-@@ -329,11 +1035,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -329,11 +1060,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  
      /* Mouse buttons go in the same table, for bindings that name them.
       * Capturing the mouse while one is down delivers its release even
@@ -13495,7 +13564,7 @@ index 3430107..7522e87 100644
          {
              int down = 0;
              int vk = xbox_InputWin32MouseVk(m, (uint32_t)w, &down);
-@@ -350,6 +1063,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -350,6 +1088,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -13510,7 +13579,7 @@ index 3430107..7522e87 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -435,145 +1156,2836 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -435,99 +1181,2718 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -13535,7 +13604,7 @@ index 3430107..7522e87 100644
 + * frame by the D3D11 presenter, or copied over it opaque by the GDI one. */
 +enum { OV_DISPMODE, OV_MONITOR, OV_RESOLUTION, OV_APPLY, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
 +       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FRAMEGEN, OV_FPS,
-+       OV_RUMBLE, OV_DEADZONE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
++       OV_RUMBLE, OV_DEADZONE, OV_FOCUSPAUSE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
 +       OV_PLAY, OV_SETTINGS, OV_BACK, OV_ITEMS };
 +#define OV_MAX_ROWS 24
 +
@@ -13694,7 +13763,22 @@ index 3430107..7522e87 100644
 -        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
 -        wc.lpszClassName = "XboxRecompFramebuffer";
 -        RegisterClassA(&wc);
--    }
++/* The held resolution, 0x0 (the desktop's) written as the desktop's size. */
++static void display_held_res(int *w, int *h)
++{
++    const Monitor *m = &s_disp.mons[s_dp.mon];
++    *w = s_dp.w ? s_dp.w : m->w;
++    *h = s_dp.w ? s_dp.h : m->h;
++}
++
++static void display_value(int item, char *value, size_t n)
++{
++    const Monitor *m;
++    int w, h;
++    if (!s_dp.held) {
++        display_hold();
++        s_dp.held = 0;              /* only read: nothing is held yet */
+     }
 -    {
 -        /* RECOMP_WINDOW_SCALE (1-8, default 2, as in the SDL window): the
 -         * client area is the frame times this, made smaller until the window
@@ -13714,41 +13798,10 @@ index 3430107..7522e87 100644
 -            if (scale <= 1 || (r.right - r.left <= work.right - work.left
 -                               && r.bottom - r.top <= work.bottom - work.top))
 -                break;
--        }
--        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
--                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
--                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
--                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
--                               r.right - r.left, r.bottom - r.top,
--                               NULL, NULL, GetModuleHandleA(NULL), NULL);
-+/* The held resolution, 0x0 (the desktop's) written as the desktop's size. */
-+static void display_held_res(int *w, int *h)
-+{
-+    const Monitor *m = &s_disp.mons[s_dp.mon];
-+    *w = s_dp.w ? s_dp.w : m->w;
-+    *h = s_dp.w ? s_dp.h : m->h;
-+}
-+
-+static void display_value(int item, char *value, size_t n)
-+{
-+    const Monitor *m;
-+    int w, h;
-+    if (!s_dp.held) {
-+        display_hold();
-+        s_dp.held = 0;              /* only read: nothing is held yet */
-     }
--    if (!hwnd) {
--        InterlockedExchange(&s_fb_running, 0);
--        return 0;
 +    if (!s_disp.nmons) {
 +        snprintf(value, n, "-");
 +        return;
-     }
--    hdc = GetDC(hwnd);
--    {
--        const char *fs = getenv("RECOMP_FULLSCREEN");
--        if (fs && *fs && *fs != '0')
--            fb_toggle_fullscreen(hwnd);
++    }
 +    m = &s_disp.mons[s_dp.mon];
 +    switch (item) {
 +    case OV_DISPMODE:
@@ -13773,22 +13826,20 @@ index 3430107..7522e87 100644
 +                snprintf(value, n, "%dx%d, %d Hz", w, h, s_disp.modes[k].hz);
 +            else
 +                snprintf(value, n, "%dx%d", w, h);
-+        }
+         }
+-        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
+-                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+-                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
+-                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
+-                               r.right - r.left, r.bottom - r.top,
+-                               NULL, NULL, GetModuleHandleA(NULL), NULL);
 +        break;
      }
+-    if (!hwnd) {
+-        InterlockedExchange(&s_fb_running, 0);
+-        return 0;
 +}
- 
--    memset(&bi, 0, sizeof(bi));
--    bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
--    bi.bmiHeader.biWidth       = (LONG)s_fb_width;
--    bi.bmiHeader.biHeight      = -(LONG)s_fb_height;   /* top-down */
--    bi.bmiHeader.biPlanes      = 1;
--    bi.bmiHeader.biBitCount    = 32;
--    bi.bmiHeader.biCompression = BI_RGB;
--
--    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
--    /* A window pinned to one address shows that memory and nothing else. */
--    fb_pinned = getenv("RECOMP_FB_VA") != NULL;
++
 +static void display_change(int item, int dir)
 +{
 +    const Monitor *m;
@@ -13826,18 +13877,18 @@ index 3430107..7522e87 100644
 +        if (s_dp.w == m->w && s_dp.h == m->h)
 +            s_dp.w = s_dp.h = 0;    /* the desktop's own: no switch */
 +        break;
-+    }
+     }
+-    hdc = GetDC(hwnd);
+-    {
+-        const char *fs = getenv("RECOMP_FULLSCREEN");
+-        if (fs && *fs && *fs != '0')
+-            fb_toggle_fullscreen(hwnd);
 +}
- 
--    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
--            s_fb_width, s_fb_height);
--    if (gpu_present_enabled())
--        gpu_present_init(hwnd, s_fb_width, s_fb_height);
++
 +/* After the monitor is switched to a new resolution, Windows' own question:
 + * keep it, or go back by itself in 15 seconds, in case the monitor shows
 + * nothing at all. Enter or A keeps it; Esc, B or closing the menu goes back. */
- 
--    while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
++
 +static void display_commit(HWND hwnd)
 +{
 +    if (!display_pending())
@@ -13857,7 +13908,7 @@ index 3430107..7522e87 100644
 +        s_keep.shown = -1;
 +    } else {
 +        ov_status("Display settings applied");
-+    }
+     }
 +}
 +
 +/* The window loop's part: the countdown in the footer, and going back when
@@ -13935,6 +13986,7 @@ index 3430107..7522e87 100644
 +            return n;
 +        }
 +        rows[n++] = OV_CLOSE;
++        rows[n++] = OV_FOCUSPAUSE;
 +        rows[n++] = OV_SCREENSHOT;
 +        rows[n++] = OV_SAVE;
 +        if (restart_pending())
@@ -14001,7 +14053,7 @@ index 3430107..7522e87 100644
 +    static const char *const labels[OV_ITEMS] = {
 +        "Display mode", "Monitor", "Resolution", "Apply display changes", "VSync", "Filter", "Scale", "Renderer", "Render resolution",
 +        "Widescreen (16:9)", "Anisotropic filtering", "Sharpening", "FXAA",
-+        "Frame generation", "FPS counter", "Rumble", "Stick dead zone", "Take screenshot",
++        "Frame generation", "FPS counter", "Rumble", "Stick dead zone", "Pause in background", "Take screenshot",
 +        "Save settings", "Restart now to apply", "Exit to Windows", "Resume",
 +        "Play", "Settings", "Back"
 +    };
@@ -14053,6 +14105,7 @@ index 3430107..7522e87 100644
 +                 s_cfg.frame_gen && !s_cfg.gpu ? " (GPU renderer only)" : "");
 +        break;
 +    case OV_FPS:      snprintf(value, n, "%s", s_cfg.fps_counter ? "On" : "Off"); break;
++    case OV_FOCUSPAUSE: snprintf(value, n, "%s", s_cfg.focus_pause ? "On" : "Off"); break;
 +    case OV_RUMBLE:     snprintf(value, n, "%s", xbox_InputGetRumble() ? "On" : "Off"); break;
 +    case OV_DEADZONE: {
 +        int dz = xbox_InputGetDeadZone();
@@ -14084,6 +14137,7 @@ index 3430107..7522e87 100644
 +        "Shows the frame rate in the top left corner.",
 +        "Controller vibration.",
 +        "Ignores small stick movements, for worn sticks that drift. Off leaves it to the game.",
++        "The game and its sound stop while the window is in the background or minimised.",
 +        "Saves the picture on screen beside the game. F12 also takes one.",
 +        "Keeps these settings for next time.",
 +        "Some changes take effect when the game starts. Saves your settings and restarts it.",
@@ -14133,6 +14187,7 @@ index 3430107..7522e87 100644
 +    snprintf(v, sizeof v, "%d", s_cfg.sharpen);
 +    ok &= WritePrivateProfileStringA("display", "sharpen", v, s_ini);
 +    ok &= WritePrivateProfileStringA("display", "fxaa", s_cfg.fxaa ? "1" : "0", s_ini);
++    ok &= WritePrivateProfileStringA("display", "pause_on_focus_loss", s_cfg.focus_pause ? "1" : "0", s_ini);
 +    ok &= WritePrivateProfileStringA("display", "frame_gen", frame_gen_name(s_cfg.frame_gen), s_ini);
 +    ok &= WritePrivateProfileStringA("input", "rumble", xbox_InputGetRumble() ? "1" : "0", s_ini);
 +    snprintf(v, sizeof v, "%d", xbox_InputGetDeadZone());
@@ -14253,6 +14308,7 @@ index 3430107..7522e87 100644
 +    case OV_FXAA:      s_cfg.fxaa = !s_cfg.fxaa; break;
 +    case OV_FRAMEGEN:  s_cfg.frame_gen = (s_cfg.frame_gen + 3 + dir) % 3; break;
 +    case OV_FPS:       s_cfg.fps_counter = !s_cfg.fps_counter; break;
++    case OV_FOCUSPAUSE: s_cfg.focus_pause = !s_cfg.focus_pause; focus_pause_update(); break;
 +    case OV_RUMBLE:     xbox_InputSetRumble(!xbox_InputGetRumble()); break;
 +    case OV_DEADZONE:
 +        for (i = 0; i < DZ_STEPS - 1 && s_dz_steps[i] < xbox_InputGetDeadZone(); i++)
@@ -16315,17 +16371,20 @@ index 3430107..7522e87 100644
 +        return 0;
 +    }
 +    hdc = GetDC(hwnd);
-+
-+    memset(&bi, 0, sizeof(bi));
-+    bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-+    bi.bmiHeader.biWidth       = (LONG)s_fb_width;
-+    bi.bmiHeader.biHeight      = -(LONG)s_fb_height;   /* top-down */
-+    bi.bmiHeader.biPlanes      = 1;
-+    bi.bmiHeader.biBitCount    = 32;
-+    bi.bmiHeader.biCompression = BI_RGB;
-+
-+    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
-+
+ 
+     memset(&bi, 0, sizeof(bi));
+     bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
+@@ -538,42 +3903,119 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     bi.bmiHeader.biCompression = BI_RGB;
+ 
+     s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
+-    /* A window pinned to one address shows that memory and nothing else. */
+-    fb_pinned = getenv("RECOMP_FB_VA") != NULL;
+ 
+-    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
+-            s_fb_width, s_fb_height);
+-    if (gpu_present_enabled())
+-        gpu_present_init(hwnd, s_fb_width, s_fb_height);
 +    use_d3d = !s_cfg.gdi && d3d_init(hwnd);
 +    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u, %s%s)\n",
 +            s_fb_width, s_fb_height,
@@ -16346,8 +16405,8 @@ index 3430107..7522e87 100644
 +    }
 +    xbox_InputSetRumble(s_cfg.rumble);
 +    xbox_InputSetDeadZone(s_cfg.deadzone);
-+
-+    while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
+ 
+     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
 -        int paced = 0;
 +        int have = 0, fresh, resized, fg_on;
@@ -16405,7 +16464,7 @@ index 3430107..7522e87 100644
 +            /* The launcher, or black from Play until the title's first
 +             * frame (s_rgb starts zeroed). */
 +            have = 1;
-         }
++        }
 +        if (InterlockedExchange(&s_want_screenshot, 0))
 +            take_screenshot();
 +        xbox_PvideoTrace();
@@ -16444,13 +16503,13 @@ index 3430107..7522e87 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
-+        }
+         }
 +        if (!use_d3d || !(s_cfg.vsync || (fg_on && s_fg_shown)) || !(have && fresh))
 +            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -584,45 +3996,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -584,45 +4026,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -16566,7 +16625,7 @@ index 3430107..7522e87 100644
      return 0;
  }
  
-@@ -630,7 +4092,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -630,7 +4122,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -16575,7 +16634,7 @@ index 3430107..7522e87 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -641,4 +4103,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -641,4 +4133,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
