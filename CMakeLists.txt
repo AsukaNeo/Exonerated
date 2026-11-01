@@ -160,6 +160,7 @@ target_compile_definitions(deathrow_recomp PRIVATE DR_VERSION="${DR_VERSION}")
 # 0,9,2,0 and "dev" is 0,0,0,0.
 set(DR_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated.ico")
 set(DR_THEME "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-theme.txt")
+set(DR_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/exonerated-defaults.ini")
 set(DR_VERSION_RC "0,0,0,0")
 if(DR_VERSION MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)")
     set(DR_VERSION_RC "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
