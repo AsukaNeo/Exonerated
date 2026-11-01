@@ -6,9 +6,7 @@ Licences matter here. Exonerated is MIT, so code may come only from MIT (or comp
 
 ## Do next
 
-1. **Lifter fix: jump tables indexed downward.** MSVC's `memcpy`/`memmove` jump through a table that is indexed *below* its address. Our disassembler counts upward, sees one entry, and decodes the rest of the table as instructions. On another title one of those "instructions" cut `memcpy` short.
-   - Source: xenophobentx/xboxrecomp (Takedawn's toolkit) commit `0a7d117`, about 40 lines in `tools/disasm/engine.py` plus a test. MIT.
-   - Needs a re-lift. Worth doing even with no symptom, since every title linked with the MSVC CRT has this code.
+1. **Lifter: jump tables indexed downward -- already covered.** MSVC's `memcpy`/`memmove` jump through a table indexed *below* its address. Takedawn's toolkit fixed this in commit `0a7d117`; ours already has the same fix from upstream (`c576d24`, "Measure jump tables down from the displacement as well as up": the `back` loop and `_jt_base` in `tools/disasm/engine.py`). Checked 2026-11-01 in every toolkit copy; nothing to do. (An earlier version of this note said otherwise.)
 2. **RetroArch shaders on our D3D11 renderer, before any Vulkan work.**
    - apexJCL's toolkit runs a slang preset with librashader's D3D11 runtime in place of the final present draw, loading the DLL at run time (`src/kernel/nv2a_present_chain.c` and a hook in `src/d3d/nv2a_pb_d3d11.c`). MIT.
    - The official `librashader.dll` won't load on a stock Windows 11 (it imports `D3DX9_43.dll`). apexJCL publishes a D3D11-only build of the unmodified source (`librashader-v0.12.0-xbr1`). We'd ship its MPL-2.0 licence and a source link, or build our own with Rust.

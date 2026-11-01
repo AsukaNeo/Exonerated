@@ -147,6 +147,7 @@ static void dr_default_env(void)
     static const char *const defaults[][2] = {
         { "RECOMP_GDLOCK",          "1" },   /* ISR/DPC vs raised IRQL */
         { "RECOMP_VBLANK",          "1" },   /* the intro waits on vblank */
+        { "RECOMP_VBLANK_SYNC",     "1" },   /* ...locked to the display's at 60/120/240 Hz */
         { "RECOMP_AC97_READY",      "1" },   /* APU: audio, voice stops */
         { "RECOMP_HEAP_RECLAIM",    "1" },
         { "RECOMP_USB",             "1" },

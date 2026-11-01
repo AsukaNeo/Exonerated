@@ -1283,7 +1283,7 @@ index 4a6389d..54b3837 100644
   * in templates/runtime/recomp_types.h for generated code. */
  void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 10d00f4..80f8f6d 100644
+index 10d00f4..41984eb 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -268,6 +268,38 @@ static void kernel_data_init(void)
@@ -1679,7 +1679,7 @@ index 10d00f4..80f8f6d 100644
  
  /* Milliseconds on the performance counter, for the vblank schedule, the
   * kernel timers and the vblank ack wait. GetTickCount64 is not good enough
-@@ -3043,6 +3317,7 @@ static int kernel_vblank_mode(void)
+@@ -3043,12 +3317,17 @@ static int kernel_vblank_mode(void)
  /* The one vblank count. The tick increments it directly, the 60 Hz
   * schedule through kernel_vblank_count; only one of the two ever runs. */
  static volatile LONG g_vblank_total;
@@ -1687,7 +1687,29 @@ index 10d00f4..80f8f6d 100644
  
  uint32_t xbox_VblankCount(void)
  {
-@@ -3259,40 +3534,70 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
+     return (uint32_t)g_vblank_total;
+ }
+ 
++/* Called at each guest vblank, on the timer thread, for the window to show
++ * frames on the guest's 60 Hz grid (fb_present.c). Must not block. */
++void (*volatile xbox_vblank_notify)(void);
++
+ /* Count one vblank, and once per 600 print a line that
+  * should read ~10000 ms. Also the shortest and longest gap between two, by
+  * the performance counter rather than the clock the schedule runs on. */
+@@ -3061,6 +3340,11 @@ static void kernel_vblank_count(long long now)
+     LARGE_INTEGER q;
+ 
+     InterlockedIncrement(&g_vblank_total);
++    {
++        void (*notify)(void) = xbox_vblank_notify;
++        if (notify)
++            notify();
++    }
+     if (!qf.QuadPart)
+         QueryPerformanceFrequency(&qf);
+     QueryPerformanceCounter(&q);
+@@ -3259,40 +3543,352 @@ static int kernel_vblank_tick_ns(uint64_t now_ns, uint64_t *next_due_ns)
      return 1;
  }
  
@@ -1700,18 +1722,69 @@ index 10d00f4..80f8f6d 100644
 + * thread (kernel_vblank_tick, kernel_timer_wait below). It takes the place
 + * of v0.16.0's tick mode. */
 +static int vblank_enabled(void)
- {
--    static long long next_ms, last_ms;
--    long long now;
++{
 +    return kernel_vblank_mode() == XBOX_VBLANK_TICK;
 +}
- 
--    if (kernel_vblank_mode() != XBOX_VBLANK_TICK)
--        return;
++
 +/* The vblank schedule: t0 + n periods. A thread that falls behind by more
 + * than a few vblanks restarts the schedule rather than delivering a burst. */
 +static LARGE_INTEGER s_vbl_freq;
 +static LONGLONG s_vbl_next, s_vbl_period;
++
++/* RECOMP_VBLANK_SYNC=1: the guest vblank follows the display's own vertical
++ * blank, as the console's followed its TV. A 60 Hz clock of our own drifts
++ * against the display's (60.000 against 59.94 or 60.02): every few seconds a
++ * frame is shown twice and the next one dropped, which reads as a hitch in
++ * smooth motion however steady the game is.
++ *
++ * A thread waits on the real vblank (D3DKMTWaitForVerticalBlankEvent) of the
++ * monitor the game's window is on, measures its period, and when the refresh
++ * is a whole multiple of about 60 Hz (59.94, 60, 119.88, 120, 240) lets every
++ * k-th one through as a guest vblank. Each game frame then stays on screen
++ * for the same number of refreshes: a 60 fps menu two at 120 Hz, a 30 fps
++ * match four. At a rate that is not a multiple (75, 144, 155) nothing locks
++ * and the 60 Hz clock runs alone, as it does when the display sends no
++ * vblanks for two periods (a minimised window, a monitor asleep). */
++static volatile LONG s_vsync_on;        /* locked: guest vblanks come from the display */
++static volatile LONG s_vsync_gen;       /* bumped at each display vblank let through */
++static volatile LONGLONG s_vsync_at;    /* the counter at that vblank */
++static volatile LONGLONG s_vsync_period;/* counter ticks between two let through */
++static volatile LONG s_vsync_div;       /* display vblanks per guest vblank, 0 unlocked */
++static volatile LONG s_vsync_hz100;     /* the display's measured rate x 100, 0 unknown */
++static volatile LONG s_vsync_varies;    /* its refresh is not steady: variable refresh */
++static LONG s_vsync_seen;               /* the timer thread's: the gen last fired */
++static void vsync_start(void);
++static void vsync_timer_wake(void);
++
++static LONGLONG vblank_due_in(void)     /* counter ticks until the next vblank */
++{
++    LARGE_INTEGER now;
++    QueryPerformanceCounter(&now);
++    if (!s_vbl_period) {
++        const char *sync = getenv("RECOMP_VBLANK_SYNC");
++        QueryPerformanceFrequency(&s_vbl_freq);
++        s_vbl_period = s_vbl_freq.QuadPart / 60;
++        s_vbl_next = now.QuadPart + s_vbl_period;
++        if (sync && *sync == '1')
++            vsync_start();
++    }
++    return s_vbl_next - now.QuadPart;
++}
++
++/* A display vblank the timer thread has not turned into a guest one yet. */
++static int vsync_pending(void)
+ {
+-    static long long next_ms, last_ms;
+-    long long now;
++    return s_vsync_on && s_vsync_gen != s_vsync_seen;
++}
+ 
+-    if (kernel_vblank_mode() != XBOX_VBLANK_TICK)
+-        return;
++/* Whether the tick fires now; s_vbl_next is when to look again. */
++static int vblank_tick_due(void)
++{
++    LARGE_INTEGER now;
  
 -    now = (long long)GetTickCount64();
 -    if (now < next_ms)
@@ -1724,21 +1797,249 @@ index 10d00f4..80f8f6d 100644
 -    if (InterlockedIncrement(&g_vblank_total) % 600 == 0) {
 -        fprintf(stderr, "  [NV2A] vblank %ld (tick): last 600 in %lld ms\n",
 -                (long)g_vblank_total, now - last_ms);
--        fflush(stderr);
--        last_ms = now;
-+static LONGLONG vblank_due_in(void)     /* counter ticks until the next vblank */
++    if (s_vsync_on) {
++        LONG gen = s_vsync_gen;
++        LONGLONG at = s_vsync_at, period = s_vsync_period;
++        QueryPerformanceCounter(&now);
++        if (gen != s_vsync_seen) {
++            s_vsync_seen = gen;
++            /* The clock takes over only if the next display vblank is
++             * late by half a period or more. */
++            s_vbl_next = at + period + period / 2;
++            return 1;
++        }
++        if (now.QuadPart - at < 2 * period) {
++            s_vbl_next = at + 2 * period;
++            return 0;
++        }
++        /* No display vblank for two periods: the clock goes on alone. */
++    }
++    if (vblank_due_in() > 0)
++        return 0;
++    s_vbl_next += s_vbl_period;
++    if (vblank_due_in() < -4 * s_vbl_period)
++        s_vbl_next += ((-vblank_due_in()) / s_vbl_period + 1) * s_vbl_period;
++    return 1;
++}
++
++/* The game's window, for the monitor to follow: the largest visible
++ * top-level window of this process. */
++typedef struct { HWND best; LONG area; } VsyncFind;
++
++static BOOL CALLBACK vsync_find_window(HWND h, LPARAM p)
 +{
-+    LARGE_INTEGER now;
-+    QueryPerformanceCounter(&now);
-+    if (!s_vbl_period) {
-+        QueryPerformanceFrequency(&s_vbl_freq);
-+        s_vbl_period = s_vbl_freq.QuadPart / 60;
-+        s_vbl_next = now.QuadPart + s_vbl_period;
++    VsyncFind *f = (VsyncFind *)p;
++    DWORD pid = 0;
++    RECT r;
++    LONG a;
++
++    GetWindowThreadProcessId(h, &pid);
++    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || !GetWindowRect(h, &r))
++        return TRUE;
++    a = (r.right - r.left) * (r.bottom - r.top);
++    if (a > f->area) {
++        f->area = a;
++        f->best = h;
++    }
++    return TRUE;
++}
++
++static HMONITOR vsync_monitor(void)
++{
++    VsyncFind f = { NULL, 0 };
++    POINT origin = { 0, 0 };
++
++    EnumWindows(vsync_find_window, (LPARAM)&f);
++    return f.best ? MonitorFromWindow(f.best, MONITOR_DEFAULTTOPRIMARY)
++                  : MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
++}
++
++typedef LONG (APIENTRY *kmt_open_fn)(void *);
++typedef LONG (APIENTRY *kmt_wait_fn)(const void *);
++typedef LONG (APIENTRY *kmt_close_fn)(const void *);
++typedef struct { HDC hDc; UINT hAdapter; LUID AdapterLuid; UINT VidPnSourceId; } KmtOpenFromHdc;
++typedef struct { UINT hAdapter; UINT hDevice; UINT VidPnSourceId; } KmtWaitVblank;
++typedef struct { UINT hAdapter; } KmtClose;
++
++/* Open the monitor's adapter for vblank waits; 0 when the host has none. */
++static int vsync_open(kmt_open_fn open, HMONITOR mon, KmtWaitVblank *wv)
++{
++    MONITORINFOEXA mi;
++    KmtOpenFromHdc oa;
++    LONG st;
++
++    memset(&mi, 0, sizeof mi);
++    mi.cbSize = sizeof mi;
++    memset(&oa, 0, sizeof oa);
++    if (!GetMonitorInfoA(mon, (MONITORINFO *)&mi)
++        || !(oa.hDc = CreateDCA(mi.szDevice, NULL, NULL, NULL)))
++        return 0;
++    st = open(&oa);
++    DeleteDC(oa.hDc);
++    if (st != 0) {
++        fprintf(stderr, "  [NV2A] vblank sync: no vblank to follow on %s (status 0x%08lX);"
++                        " the 60 Hz clock runs alone\n", mi.szDevice, (unsigned long)st);
+         fflush(stderr);
+-        last_ms = now;
++        return 0;
      }
-+    return s_vbl_next - now.QuadPart;
++    memset(wv, 0, sizeof *wv);
++    wv->hAdapter = oa.hAdapter;
++    wv->VidPnSourceId = oa.VidPnSourceId;
++    fprintf(stderr, "  [NV2A] vblank sync: following %s\n", mi.szDevice);
++    fflush(stderr);
++    return 1;
 +}
  
 -    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
++/* Lock or unlock at a measured display rate: k display vblanks per guest
++ * vblank when the rate is k x 59.4-60.6 Hz and steady. A variable-refresh
++ * display (G-Sync, FreeSync) refreshes when a frame arrives, so its vblanks
++ * follow our own presents: locked to them, the game's vblank would chase
++ * its own frames. Its gaps scatter, and steady is 95% of them within 3% of
++ * the period; anything else runs on the 60 Hz clock, which a variable
++ * display then shows as it comes. */
++static void vsync_relock(double hz, int steady)
++{
++    int k = (int)(hz / 60.0 + 0.5);
++    double off = k >= 1 ? hz / k - 60.0 : 99.0;
++    int div = (steady && k >= 1 && k <= 8 && off < 0.6 && off > -0.6) ? k : 0;
++    int state = div ? div : steady ? -1 : -2;
++    static int said;                    /* the state last logged, 0 none yet */
++
++    InterlockedExchange(&s_vsync_hz100, (LONG)(hz * 100.0 + 0.5));
++    InterlockedExchange(&s_vsync_varies, !steady);
++    if (state == said && div == s_vsync_div && (div != 0) == (s_vsync_on != 0))
++        return;                         /* unchanged (a reopen clears the lock) */
++    said = state;
++    InterlockedExchange(&s_vsync_div, div);
++    InterlockedExchange(&s_vsync_on, div != 0);
++    if (div)
++        fprintf(stderr, "  [NV2A] vblank sync: display %.2f Hz, a guest vblank every %d"
++                        " refresh%s (%.2f Hz)\n", hz, div, div > 1 ? "es" : "", hz / div);
++    else if (!steady)
++        fprintf(stderr, "  [NV2A] vblank sync: the display's refresh varies (variable refresh?);"
++                        " the 60 Hz clock runs alone\n");
++    else
++        fprintf(stderr, "  [NV2A] vblank sync: display %.2f Hz is not a multiple of 60;"
++                        " the 60 Hz clock runs alone\n", hz);
++    fflush(stderr);
++}
++
++static DWORD WINAPI vsync_thread(LPVOID unused)
++{
++    HMODULE gdi = LoadLibraryA("gdi32.dll");
++    kmt_open_fn open = gdi ? (kmt_open_fn)(void *)GetProcAddress(gdi, "D3DKMTOpenAdapterFromHdc") : NULL;
++    kmt_wait_fn wait = gdi ? (kmt_wait_fn)(void *)GetProcAddress(gdi, "D3DKMTWaitForVerticalBlankEvent") : NULL;
++    kmt_close_fn close = gdi ? (kmt_close_fn)(void *)GetProcAddress(gdi, "D3DKMTCloseAdapter") : NULL;
++    KmtWaitVblank wv;
++    HMONITOR mon = NULL;
++    LARGE_INTEGER freq, t, last;
++    double period = 0;                  /* the display's period, counter ticks, smoothed */
++    DWORD checked = 0;
++    unsigned fails = 0, count = 0, settle = 0, in_band = 0, out_band = 0;
++    int open_ok = 0;
++
++    (void)unused;
++    last.QuadPart = 0;
++    memset(&wv, 0, sizeof wv);
++    if (!open || !wait) {
++        fprintf(stderr, "  [NV2A] vblank sync: the host has no vblank wait; the 60 Hz clock runs alone\n");
++        return 0;
++    }
++    QueryPerformanceFrequency(&freq);
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
++    for (;;) {
++        DWORD ms = GetTickCount();
++        /* The window may move to another monitor: look once a second. */
++        if (!open_ok || ms - checked >= 1000) {
++            HMONITOR m = vsync_monitor();
++            checked = ms;
++            if (!open_ok || m != mon) {
++                if (open_ok && close) {
++                    KmtClose c;
++                    c.hAdapter = wv.hAdapter;
++                    close(&c);
++                }
++                InterlockedExchange(&s_vsync_on, 0);
++                InterlockedExchange(&s_vsync_div, 0);
++                mon = m;
++                open_ok = vsync_open(open, mon, &wv);
++                period = 0;
++                last.QuadPart = 0;
++                settle = in_band = out_band = 0;
++                if (!open_ok) {
++                    Sleep(1000);
++                    continue;
++                }
++            }
++        }
++        if (wait(&wv) != 0) {
++            InterlockedExchange(&s_vsync_on, 0);
++            if (++fails > 100) {
++                fprintf(stderr, "  [NV2A] vblank sync: the display's vblank wait keeps failing;"
++                                " the 60 Hz clock runs alone\n");
++                fflush(stderr);
++                return 0;
++            }
++            Sleep(4);
++            open_ok = 0;              /* reopen: the adapter may have gone (a mode change) */
++            continue;
++        }
++        fails = 0;
++        QueryPerformanceCounter(&t);
++        if (last.QuadPart) {
++            double d = (double)(t.QuadPart - last.QuadPart);
++            /* A gap over 1.5 periods is a missed vblank, not the rate. */
++            if (!period)
++                period = d;
++            else if (d < period * 1.5)
++                period += (d - period) / 32.0;
++            if (d > period * 0.97 && d < period * 1.03)
++                in_band++;
++            else
++                out_band++;
++            if (++settle == 120 || (settle > 120 && settle % 600 == 0)) {
++                vsync_relock((double)freq.QuadPart / period, out_band * 20 <= in_band + out_band);
++                in_band = out_band = 0;
++            }
++        }
++        last = t;
++        if (s_vsync_div && ++count % (unsigned)s_vsync_div == 0) {
++            InterlockedExchange64(&s_vsync_period, (LONGLONG)(period * s_vsync_div));
++            InterlockedExchange64(&s_vsync_at, t.QuadPart);
++            InterlockedIncrement(&s_vsync_gen);
++            vsync_timer_wake();
++        }
++    }
++}
++
++static void vsync_start(void)
++{
++    HANDLE h = CreateThread(NULL, 0, vsync_thread, NULL, 0, NULL);
++    if (h)
++        CloseHandle(h);
++}
++
++/* For the window and its menu: the display's measured rate (0 unknown) and
++ * how many of its refreshes make one guest vblank (0: not locked). */
++double xbox_VblankDisplayHz(void)
++{
++    return s_vsync_hz100 / 100.0;
++}
++
++int xbox_VblankSyncDivider(void)
++{
++    return s_vsync_on ? (int)s_vsync_div : 0;
++}
++
++/* 1 when the display's refresh follows the frames (G-Sync, FreeSync): the
++ * vblank sync thread found its gaps scattered (RECOMP_VBLANK_SYNC=1). */
++int xbox_VblankDisplayVaries(void)
++{
++    return s_vsync_varies != 0;
++}
++
 +/* [si1] Write-1-to-clear interrupt status, emulated while the timer thread
 + * delivers an interrupt. Set in kernel_irq_traps_arm and nv2a_irq_veh below. */
 +static volatile int s_irq_w1c;           /* the traps are armed and a delivery is on */
@@ -1749,23 +2050,25 @@ index 10d00f4..80f8f6d 100644
 +{
 +    if (!vblank_enabled())
 +        return;
-+    if (vblank_due_in() > 0)
-         return;
-+    s_vbl_next += s_vbl_period;
-+    if (vblank_due_in() < -4 * s_vbl_period)
-+        s_vbl_next += ((-vblank_due_in()) / s_vbl_period + 1) * s_vbl_period;
++    if (!vblank_tick_due())
++        return;
 +    InterlockedIncrement(&g_vblank_total);
++    {
++        void (*notify)(void) = xbox_vblank_notify;
++        if (notify)
++            notify();
++    }
 +    InterlockedIncrement(&ke3_vbn);                          /* [ke3] */
 +    if (g_nv2a_gpu_event)
 +        SetEvent(g_nv2a_gpu_event);
++
++    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
++        InterlockedIncrement(&ke3_vb[2]);
+         return;
++    }
  
 -    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PCRTC_INTR_0) |= NV2A_PCRTC_INTR_VBLANK;
 -    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)   |= NV2A_PMC_INTR_PCRTC;
-+    if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
-+        InterlockedIncrement(&ke3_vb[2]);
-+        return;
-+    }
-+
 +    if (s_irq_w1c) {
 +        s_pcrtc_pending |= NV2A_PCRTC_INTR_VBLANK;
 +        nv2a_intr_publish();
@@ -1781,7 +2084,7 @@ index 10d00f4..80f8f6d 100644
          if (n++ < 3)
              fprintf(stderr, "  [NV2A] vblank -> ISR %s\n",
                      claimed < 0 ? "not callable" :
-@@ -3348,6 +3653,367 @@ static int kernel_drain_dpcs(int *ran)
+@@ -3348,6 +3944,379 @@ static int kernel_drain_dpcs(int *ran)
      }
  }
  
@@ -2130,26 +2433,38 @@ index 10d00f4..80f8f6d 100644
 +    ms = due <= 0 ? 0 : (DWORD)(due * 1000 / s_vbl_freq.QuadPart);
 +    if (ms > 10)
 +        ms = 10;
++    if (vsync_pending())
++        return;                       /* the display's vblank is in: fire it now */
 +    if (ms > 1) {
 +        if (g_timer_wake)
 +            WaitForSingleObject(g_timer_wake, ms - 1);
 +        else
 +            Sleep(ms - 1);
-+        if (g_swm_state == 1)
++        if (g_swm_state == 1 || vsync_pending())
 +            return;
 +    }
++    /* Locked to the display, the vsync thread wakes this one at the edge;
++     * the yield loop is only for the clock's own edges. */
++    if (s_vsync_on)
++        return;
 +    while (vblank_due_in() > 0 && vblank_due_in() * 1000 < s_vbl_freq.QuadPart * 2) {
 +        if (g_swm_state == 1)
 +            return;
 +        SwitchToThread();
 +    }
 +}
++
++static void vsync_timer_wake(void)
++{
++    if (g_timer_wake)
++        SetEvent(g_timer_wake);
++}
 +/* ---- end [si1] ----------------------------------------------------------- */
 +
  /* The timer thread's drain, for tests/irq_progress: the timer thread itself
   * cannot start without a title's TLS image for its TIB. */
  int xbox_DpcDrainTimer(int *ran)
-@@ -3379,6 +4045,112 @@ int xbox_DpcDrainHere(void)
+@@ -3379,6 +4348,112 @@ int xbox_DpcDrainHere(void)
   * Initializes a DPC object. The Xbox KDPC structure is 32 bytes.
   * We zero it and set the routine and context pointers.
   */
@@ -2262,7 +2577,7 @@ index 10d00f4..80f8f6d 100644
  static void bridge_KeInitializeDpc(void)
  {
      uint32_t dpc_va = STACK_ARG(0);
-@@ -3401,6 +4173,7 @@ static void bridge_KeInitializeDpc(void)
+@@ -3401,6 +4476,7 @@ static void bridge_KeInitializeDpc(void)
      BRIDGE_MEM16(dpc_va + 0) = 0x13;   /* Type */
      BRIDGE_MEM32(dpc_va + 12) = routine; /* DeferredRoutine */
      BRIDGE_MEM32(dpc_va + 16) = context; /* DeferredContext */
@@ -2270,7 +2585,7 @@ index 10d00f4..80f8f6d 100644
      g_eax = 0;
  }
  
-@@ -3763,6 +4536,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3763,6 +4839,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          }
          g_fs_base = tib;
      }
@@ -2278,7 +2593,7 @@ index 10d00f4..80f8f6d 100644
  
      if (!kernel_timer_paced()) {
          /* Neither the 60 Hz vblank nor the gate: the 10 ms tick, the
-@@ -3772,9 +4546,12 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3772,9 +4849,12 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              long long timer_due;
              int ran;
  
@@ -2293,7 +2608,7 @@ index 10d00f4..80f8f6d 100644
              kernel_fire_timers(kernel_timer_clock_ms(), &timer_due);
          }
      }
-@@ -4097,6 +4874,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
+@@ -4097,6 +5177,9 @@ static HANDLE bridge_resolve_handle(uint32_t token)
      return (HANDLE)(uintptr_t)token;
  }
  
@@ -2303,7 +2618,7 @@ index 10d00f4..80f8f6d 100644
  static HANDLE bridge_take_handle(uint32_t token)
  {
      if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-@@ -5007,25 +5787,84 @@ static void bridge_NtQueryDirectoryFile(void)
+@@ -5007,25 +6090,84 @@ static void bridge_NtQueryDirectoryFile(void)
      bridge_write_iostatus(ios_va, ios.Status, (uint32_t)ios.Information);
  }
  
@@ -2392,7 +2707,7 @@ index 10d00f4..80f8f6d 100644
      if (retlen_va) BRIDGE_MEM32(retlen_va) = (uint32_t)len;
  
      /* Say so when the buffer could not be filled.
-@@ -8446,6 +9285,8 @@ static void bridge_KePulseEvent(void)
+@@ -8446,6 +9588,8 @@ static void bridge_KePulseEvent(void)
          }
      }
      h = ke_shadow_lookup(guest_va);
@@ -2401,7 +2716,7 @@ index 10d00f4..80f8f6d 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -8514,6 +9355,14 @@ static void bridge_KeResetEvent(void)
+@@ -8514,6 +9658,14 @@ static void bridge_KeResetEvent(void)
          }
      }
      h = ke_shadow_lookup(guest_va);
@@ -2416,7 +2731,7 @@ index 10d00f4..80f8f6d 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -8746,6 +9595,16 @@ static void bridge_KeSetEventBoostPriority(void)
+@@ -8746,6 +9898,16 @@ static void bridge_KeSetEventBoostPriority(void)
      (void)increment;
  
      h = ke_shadow_lookup(guest_va);
@@ -2433,7 +2748,7 @@ index 10d00f4..80f8f6d 100644
      if (!h)
          h = XBOX_TO_NATIVE(guest_va);
      if (h)
-@@ -11050,6 +11909,151 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count)
+@@ -11050,6 +12212,151 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count)
      g_ordinal_remap_count = count;
  }
  
@@ -2585,7 +2900,7 @@ index 10d00f4..80f8f6d 100644
  void xbox_kernel_bridge_init(void)
  {
      int i;
-@@ -11063,6 +12067,8 @@ void xbox_kernel_bridge_init(void)
+@@ -11063,6 +12370,8 @@ void xbox_kernel_bridge_init(void)
       * other thread. */
      xbox_DpcMarkGuestThread();
      guest_cpu_join();
@@ -2594,7 +2909,7 @@ index 10d00f4..80f8f6d 100644
      fprintf(stderr, "  Kernel thunk bridge: resolving %d entries at 0x%08X\n",
              g_thunk_table_count, g_thunk_table_base);
  
-@@ -11194,3 +12200,17 @@ void xbox_kernel_bridge_init(void)
+@@ -11194,3 +12503,17 @@ void xbox_kernel_bridge_init(void)
              KERNEL_VA_BASE, KERNEL_VA_BASE + (resolved - 1) * 4);
  
  }
@@ -3159,10 +3474,10 @@ index 0000000..d0b2adc
 +#endif
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
 new file mode 100644
-index 0000000..885f70e
+index 0000000..d1cc842
 --- /dev/null
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
-@@ -0,0 +1,4017 @@
+@@ -0,0 +1,4035 @@
 +#include "nv2a_gpu.h"
 +#include <d3d11.h>
 +#include <d3d11_1.h>
@@ -5265,6 +5580,20 @@ index 0000000..885f70e
 +};
 +static PresentPipeline present_pipeline;
 +
++/* For the window's [PACE] lines (pace_stats.c): flips that asked to be shown,
++ * those with no surface to show, and frames published and skipped. Read
++ * unlocked from the window thread; a count a frame stale is fine. */
++static volatile uint64_t present_calls, present_no_surface;
++
++extern "C" void xbox_GpuPresentCounts(uint64_t *calls, uint64_t *no_surface,
++                                      uint64_t *published, uint64_t *skipped)
++{
++    *calls = present_calls;
++    *no_surface = present_no_surface;
++    *published = present_pipeline.frames;
++    *skipped = present_pipeline.skipped;
++}
++
 +static bool gpu_present_enabled()
 +{
 +    static const bool enabled = []() {
@@ -5310,9 +5639,13 @@ index 0000000..885f70e
 +static void present_to_window(const void *presented)
 +{
 +    if (!gpu_present_enabled() || present_pipeline.broken) return;
++    present_calls = present_calls + 1;
 +    Surface *surface = surface_for_memory(presented);
 +    uint32_t width = 0, height = 0;
-+    if (!surface || !surface->view || !xbox_FramebufferWindowFrameSize(&width, &height)) return;
++    if (!surface || !surface->view || !xbox_FramebufferWindowFrameSize(&width, &height)) {
++        present_no_surface = present_no_surface + 1;
++        return;
++    }
 +    width *= render_scale(); height *= render_scale();
 +    if (!present_pipeline_ready(width, height)) return;
 +    PresentPipeline &p = present_pipeline;
@@ -12479,7 +12812,7 @@ index 18291d7..f447290 100644
   * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
 diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
-index 331d2e2..ce3fdbe 100644
+index 331d2e2..b7ef2c6 100644
 --- a/src/video/CMakeLists.txt
 +++ b/src/video/CMakeLists.txt
 @@ -3,6 +3,7 @@ add_library(xbox_video STATIC
@@ -12490,8 +12823,18 @@ index 331d2e2..ce3fdbe 100644
  )
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
+@@ -13,7 +14,8 @@ target_include_directories(xbox_video PUBLIC
+ target_link_libraries(xbox_video PUBLIC xbox_d3d8 xbox_input xbox_nv2a)
+ if(WIN32)
+     # gpu_present.c: the framebuffer window's D3D11 presenter.
+-    target_sources(xbox_video PRIVATE gpu_present.c)
++    # pace_stats.c: how evenly frames reach the screen ([PACE] lines).
++    target_sources(xbox_video PRIVATE gpu_present.c pace_stats.c)
+     target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32
+                           d3d11 dxgi dxguid d3dcompiler)
+ else()
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 3430107..ea553d4 100644
+index 3430107..dd4a1fa 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -7,28 +7,89 @@
@@ -12595,11 +12938,12 @@ index 3430107..ea553d4 100644
  /* Which keys are down, for the pad stand-in in src/input: this window
   * records them in the shared key table (src/input/keyboard.c).
   *
-@@ -38,15 +99,18 @@
+@@ -38,15 +99,19 @@
   * is the thing that receives the keys, so that is what has to remember
   * them. */
  #include "keyboard.h"   /* src/input */
 -#include "gpu_present.h"
++#include "pace_stats.h"
  #include "recomp_exit_hook.h"   /* src/platform */
 -#include <stdbool.h>
 -#include "pvideo_scanout.h"
@@ -12618,7 +12962,7 @@ index 3430107..ea553d4 100644
  static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
  static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  
-@@ -64,68 +128,52 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -64,68 +129,119 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -12680,10 +13024,6 @@ index 3430107..ea553d4 100644
 -        memcpy(s_pvideo_regs, regs, sizeof(s_pvideo_regs));
 -        presented = true;
 -        nv2a_hook_pvideo_consume(bank);
--    }
--    if (!presented && s_pvideo_source)
--        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
--                       s_fb_width, s_fb_height, s_pvideo_bank);
 +/* The GPU back end's image of the same frame, when it drew one: a texture
 + * shared from its device (nv2a_gpu_d3d11.cpp, present_to_window), larger than
 + * the guest frame at a render scale above 1. s_gpu_mark is raised by the back
@@ -12703,13 +13043,83 @@ index 3430107..ea553d4 100644
 +    InterlockedIncrement(&s_gpu_gen);
 +}
 +
++/* A frame for the window: the GPU back end's published one or the CPU copy.
++ * The window thread waits on this rather than polling, and on the GPU path
++ * it counts published frames, not flips: the flip count moves before the
++ * back end has published that flip's frame, and a window woken by it showed
++ * the old frame again, then missed the new one until the next flip had
++ * overwritten it -- a repeat and a lost frame each time, 4-6 a second. */
++static volatile LONG s_gpu_frames;
++static HANDLE volatile s_frame_event;
++
++/* The guest's vblank, for showing frames on its grid (grid_repeat in
++ * fb_thread), and what the vblank sync thread found the display to be
++ * (kernel_bridge.c, RECOMP_VBLANK_SYNC). */
++extern void (*volatile xbox_vblank_notify)(void);
++extern int xbox_VblankDisplayVaries(void);
++extern uint32_t xbox_VblankCount(void);
++
++/* RECOMP_PRESENT_GRID=2: the grid on every display, for comparisons. */
++static int grid_force(void)
++{
++    static int f = -1;
++    if (f < 0) {
++        const char *v = getenv("RECOMP_PRESENT_GRID");
++        f = v && *v == '2';
++    }
++    return f;
++}
++
++static void vblank_notify(void)
++{
++    HANDLE e = s_frame_event;
++    if (e)
++        SetEvent(e);
++}
++
++static HANDLE frame_event(void)
++{
++    if (!s_frame_event) {
++        HANDLE e = CreateEventA(NULL, FALSE, FALSE, NULL);
++        if (e && InterlockedCompareExchangePointer((PVOID volatile *)&s_frame_event, e, NULL))
++            CloseHandle(e);                    /* another thread made it first */
++    }
++    return s_frame_event;
++}
++
++/* Gaps between published frames, for the [PACE] lines: under 4 ms, 4-12,
++ * 12-20, 20-28, 28 and over. Two frames published closer than the window
++ * can take them lose the first. */
++static volatile LONG s_pub_gaps[5];
++static LONG64 s_pub_last;
++
++void xbox_FramebufferWindowPublishGaps(long out[5])
++{
++    int i;
++    for (i = 0; i < 5; i++)
++        out[i] = InterlockedExchange(&s_pub_gaps[i], 0);
++}
++
 +void xbox_FramebufferWindowGpuFrameReady(void)
 +{
-+    LARGE_INTEGER now;
++    LARGE_INTEGER now, f;
++    HANDLE e = frame_event();
 +    QueryPerformanceCounter(&now);
++    QueryPerformanceFrequency(&f);
++    if (s_pub_last) {
++        LONG64 ms = (now.QuadPart - s_pub_last) * 1000 / f.QuadPart;
++        InterlockedIncrement(&s_pub_gaps[ms < 4 ? 0 : ms < 12 ? 1 : ms < 20 ? 2 : ms < 28 ? 3 : 4]);
+     }
+-    if (!presented && s_pvideo_source)
+-        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
+-                       s_fb_width, s_fb_height, s_pvideo_bank);
++    s_pub_last = now.QuadPart;
 +    InterlockedExchange64(&s_gpu_qpc, now.QuadPart);
 +    InterlockedExchange(&s_gpu_last_ms, (LONG)GetTickCount());
 +    InterlockedExchange(&s_gpu_mark, 1);
++    InterlockedIncrement(&s_gpu_frames);
++    if (e)
++        SetEvent(e);
 +}
 +
 +/* The video overlay a title plays its movies on (pvideo_overlay.c), drawn
@@ -12733,7 +13143,7 @@ index 3430107..ea553d4 100644
  }
  
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
-@@ -160,6 +208,8 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -160,6 +276,8 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
  
      if (!s_fb_running || !fb_va || !pitch)
          return;
@@ -12742,15 +13152,18 @@ index 3430107..ea553d4 100644
      if (getenv("RECOMP_FB_VA"))
          return;                       /* pinned: leave the old path alone */
      next = (s_present_idx == 0) ? 1 : 0;
-@@ -197,6 +247,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -197,7 +315,10 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
          }
      }
      /* Published only once it is whole. */
 +    InterlockedExchange(&s_present_gpu, InterlockedExchange(&s_gpu_mark, 0));
      InterlockedExchange(&s_present_idx, next);
++    if (frame_event())
++        SetEvent(s_frame_event);
  }
  
-@@ -222,68 +273,748 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
+ /* Title bar, the way ps3recomp's window shows it. Written by the flip,
+@@ -222,68 +343,798 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
      InterlockedExchange(&s_frame_draws, (LONG)draws);
  }
  
@@ -12784,11 +13197,20 @@ index 3430107..ea553d4 100644
 +    return f == FG_MOTION ? "motion" : f == FG_BLEND ? "blend" : "off";
 +}
 +
++/* Fullscreen's refresh rate ([display] refresh). Auto takes a multiple of 60
++ * where the monitor has one: the guest's vblank then locks to every k-th
++ * refresh (RECOMP_VBLANK_SYNC, kernel_bridge.c) and each game frame stays up
++ * the same number of refreshes. 144 Hz shows a 60 fps game 2 and 3 refreshes
++ * in turn, which judders however steady the game is. */
++#define REFRESH_AUTO 0
++#define REFRESH_MAX  (-1)
++
 +static struct {
 +    int  vsync, filter, scale, window_scale, gdi, fps_counter;
 +    int  mode;              /* MODE_WINDOWED, MODE_BORDERLESS or MODE_FULLSCREEN */
 +    char monitor[32];       /* its device name, \\.\DISPLAY2; "" the primary */
 +    int  res_w, res_h;      /* Fullscreen's resolution, 0x0 the desktop's */
++    int  refresh;           /* Fullscreen's refresh: REFRESH_AUTO, REFRESH_MAX or Hz */
 +    int  rumble, deadzone;  /* [input]; applied to the input layer at start */
 +    int  focus_pause;       /* the game and its sound wait while the window is in the background */
 +    int  gpu;               /* the GPU back end draws (RECOMP_PB_BACKEND=d3d11) */
@@ -12949,7 +13371,7 @@ index 3430107..ea553d4 100644
 +                    s_ini[0] = 0;
 +            }
 +        }
-+    }
+     }
 +
 +    s_cfg.vsync = cfg_int("RECOMP_VSYNC", "vsync", 1) != 0;
 +    /* mode, or the older fullscreen=1 meaning Borderless */
@@ -12961,6 +13383,10 @@ index 3430107..ea553d4 100644
 +    cfg_str("RECOMP_RESOLUTION", "resolution", "desktop", buf, sizeof buf);
 +    if (sscanf(buf, "%dx%d", &s_cfg.res_w, &s_cfg.res_h) != 2 || s_cfg.res_w < 640 || s_cfg.res_h < 480)
 +        s_cfg.res_w = s_cfg.res_h = 0;
++    /* refresh: auto (a multiple of 60 where the monitor has one), max, or Hz */
++    cfg_str("RECOMP_REFRESH", "refresh", "auto", buf, sizeof buf);
++    s_cfg.refresh = !_stricmp(buf, "max") ? REFRESH_MAX
++                  : atoi(buf) >= 24 && atoi(buf) <= 500 ? atoi(buf) : REFRESH_AUTO;
 +    s_cfg.window_scale = cfg_int("RECOMP_WINDOW_SCALE", "window_scale", 2);
 +    if (s_cfg.window_scale < 1 || s_cfg.window_scale > 8)
 +        s_cfg.window_scale = 2;
@@ -12986,7 +13412,7 @@ index 3430107..ea553d4 100644
 +    {
 +        int a = cfg_int("RECOMP_ANISOTROPY", "anisotropy", 0);
 +        s_cfg.anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
-     }
++    }
 +    s_cfg.sharpen = cfg_int("RECOMP_SHARPEN", "sharpen", 0);
 +    if (s_cfg.sharpen < 0) s_cfg.sharpen = 0;
 +    if (s_cfg.sharpen > 100) s_cfg.sharpen = 100;
@@ -13090,7 +13516,14 @@ index 3430107..ea553d4 100644
 +    int  w, h;                 /* its desktop resolution */
 +} Monitor;
 +
-+typedef struct { int w, h, hz; } DispMode;
++/* hz: the highest refresh at that size; even: the highest that is a
++ * multiple of 60 (59 and 119 count: Windows rounds 59.94 down), 0 none. */
++typedef struct { int w, h, hz, even; } DispMode;
++
++static int hz_even(int hz)
++{
++    return hz >= 59 && (hz % 60 == 0 || (hz + 1) % 60 == 0);
++}
 +
 +static struct {
 +    Monitor  mons[MAX_MONITORS];
@@ -13188,7 +13621,12 @@ index 3430107..ea553d4 100644
 +
 +/* A monitor by its device name; the primary for "" or one not plugged in. */
 +static int mon_find(const char *dev)
-+{
+ {
+-    /* First press only (bit 30: the key was already down), and with Alt held
+-     * (bit 29) for Enter; neither reaches the key table. */
+-    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
+-        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
+-        fb_toggle_fullscreen(h);
 +    int i, primary = 0;
 +    for (i = 0; i < s_disp.nmons; i++) {
 +        if (dev && dev[0] && !_stricmp(s_disp.mons[i].dev, dev))
@@ -13265,10 +13703,13 @@ index 3430107..ea553d4 100644
 +            s_disp.modes[k].w = (int)dm.dmPelsWidth;
 +            s_disp.modes[k].h = (int)dm.dmPelsHeight;
 +            s_disp.modes[k].hz = 0;
++            s_disp.modes[k].even = 0;
 +            s_disp.nmodes++;
 +        }
 +        if ((int)dm.dmDisplayFrequency > s_disp.modes[k].hz)
 +            s_disp.modes[k].hz = (int)dm.dmDisplayFrequency;
++        if (hz_even((int)dm.dmDisplayFrequency) && (int)dm.dmDisplayFrequency > s_disp.modes[k].even)
++            s_disp.modes[k].even = (int)dm.dmDisplayFrequency;
 +    }
 +    qsort(s_disp.modes, (size_t)s_disp.nmodes, sizeof s_disp.modes[0], dispmode_cmp);
 +}
@@ -13307,28 +13748,45 @@ index 3430107..ea553d4 100644
 +    s_disp.switched[0] = 0;
 +}
 +
-+/* Switch a monitor to w x h; nothing to do at its desktop resolution. */
++/* The refresh rate Fullscreen uses at mode k, 0 when unknown. */
++static int mode_hz(int k)
++{
++    if (k < 0)
++        return s_cfg.refresh > 0 ? s_cfg.refresh : 0;
++    if (s_cfg.refresh > 0)
++        return s_cfg.refresh;
++    if (s_cfg.refresh == REFRESH_AUTO && s_disp.modes[k].even)
++        return s_disp.modes[k].even;
++    return s_disp.modes[k].hz;
++}
++
++/* Switch a monitor to w x h (0: its desktop resolution) at mode_hz; nothing
++ * to do when it is in that mode already. */
 +static int display_switch(const Monitor *m, int w, int h)
- {
--    /* First press only (bit 30: the key was already down), and with Alt held
--     * (bit 29) for Enter; neither reaches the key table. */
--    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
--        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
--        fb_toggle_fullscreen(h);
-+    DEVMODEA dm;
++{
++    DEVMODEA dm, cur;
 +    LONG rc;
-+    int k;
-+    if (!w || (w == m->w && h == m->h))
-+        return 1;
++    int k, hz;
++    if (!w) {
++        w = m->w;
++        h = m->h;
++    }
 +    modes_load(m->dev);
 +    k = modes_find(w, h);
++    hz = mode_hz(k);
++    memset(&cur, 0, sizeof cur);
++    cur.dmSize = sizeof cur;
++    if (w == m->w && h == m->h
++        && (!hz || (EnumDisplaySettingsA(m->dev, ENUM_CURRENT_SETTINGS, &cur)
++                    && (int)cur.dmDisplayFrequency == hz)))
++        return 1;
 +    memset(&dm, 0, sizeof dm);
 +    dm.dmSize = sizeof dm;
 +    dm.dmPelsWidth = (DWORD)w;
 +    dm.dmPelsHeight = (DWORD)h;
 +    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
-+    if (k >= 0 && s_disp.modes[k].hz) {
-+        dm.dmDisplayFrequency = (DWORD)s_disp.modes[k].hz;
++    if (hz) {
++        dm.dmDisplayFrequency = (DWORD)hz;
 +        dm.dmFields |= DM_DISPLAYFREQUENCY;
 +    }
 +    memset(&s_disp.before, 0, sizeof s_disp.before);
@@ -13336,15 +13794,20 @@ index 3430107..ea553d4 100644
 +    if (!EnumDisplaySettingsA(m->dev, ENUM_CURRENT_SETTINGS, &s_disp.before))
 +        return 0;
 +    rc = ChangeDisplaySettingsExA(m->dev, &dm, NULL, CDS_FULLSCREEN, NULL);
++    if (rc != DISP_CHANGE_SUCCESSFUL && hz && s_cfg.refresh > 0 && k >= 0) {
++        /* A rate the monitor does not have at that size: its own choice. */
++        dm.dmDisplayFrequency = (DWORD)s_disp.modes[k].hz;
++        hz = s_disp.modes[k].hz;
++        rc = ChangeDisplaySettingsExA(m->dev, &dm, NULL, CDS_FULLSCREEN, NULL);
++    }
 +    if (rc != DISP_CHANGE_SUCCESSFUL) {
-+        fprintf(stderr, "  [FBWIN] %s: %dx%d refused (%ld)\n", m->dev, w, h, rc);
++        fprintf(stderr, "  [FBWIN] %s: %dx%d at %d Hz refused (%ld)\n", m->dev, w, h, hz, rc);
          return 0;
      }
 -    if (m == WM_SYSKEYDOWN && w == VK_RETURN)
 -        return 0;                       /* auto-repeat of Alt+Enter */
 +    snprintf(s_disp.switched, sizeof s_disp.switched, "%s", m->dev);
-+    fprintf(stderr, "  [FBWIN] %s switched to %dx%d at %d Hz\n", m->dev, w, h,
-+            k >= 0 ? s_disp.modes[k].hz : 0);
++    fprintf(stderr, "  [FBWIN] %s switched to %dx%d at %d Hz\n", m->dev, w, h, hz);
 +    return 1;
 +}
 +
@@ -13495,9 +13958,9 @@ index 3430107..ea553d4 100644
 +            const RECT *r = (const RECT *)l;
 +            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
 +                         SWP_NOZORDER | SWP_NOACTIVATE);
-+        }
-+        return 0;
-+
+         }
+         return 0;
+ 
 +    /* Fullscreen at a resolution of its own: Alt+Tab gives the desktop back
 +     * and minimises; coming back switches again (in the window loop, out of
 +     * this message). */
@@ -13510,9 +13973,9 @@ index 3430107..ea553d4 100644
 +            ShowWindow(h, SW_MINIMIZE);
 +        } else if (w && s_disp.away) {
 +            InterlockedExchange(&s_want_display_reapply, 1);
-         }
-         return 0;
- 
++        }
++        return 0;
++
 +    case WM_ERASEBKGND:
 +        return 1;                       /* every pixel is drawn each frame */
 +
@@ -13544,7 +14007,7 @@ index 3430107..ea553d4 100644
          xbox_InputKeySet((int)w, 1);
          /* A Shift, Ctrl or Alt is also its side's key, for bindings to
           * "lshift" and the like; wParam stays the either-side one. */
-@@ -329,11 +1060,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -329,11 +1180,18 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  
      /* Mouse buttons go in the same table, for bindings that name them.
       * Capturing the mouse while one is down delivers its release even
@@ -13564,7 +14027,7 @@ index 3430107..ea553d4 100644
          {
              int down = 0;
              int vk = xbox_InputWin32MouseVk(m, (uint32_t)w, &down);
-@@ -350,6 +1088,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -350,6 +1208,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          xbox_InputKeysClear();
          return 0;
@@ -13579,7 +14042,7 @@ index 3430107..ea553d4 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -435,99 +1181,2718 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -435,99 +1301,2755 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -13605,7 +14068,7 @@ index 3430107..ea553d4 100644
 +enum { OV_DISPMODE, OV_MONITOR, OV_RESOLUTION, OV_APPLY, OV_VSYNC, OV_FILTER, OV_SCALE, OV_GPU, OV_RENDER, OV_WIDE,
 +       OV_ANISO, OV_SHARPEN, OV_FXAA, OV_FRAMEGEN, OV_FPS,
 +       OV_RUMBLE, OV_DEADZONE, OV_FOCUSPAUSE, OV_SCREENSHOT, OV_SAVE, OV_RESTART, OV_EXIT, OV_CLOSE,
-+       OV_PLAY, OV_SETTINGS, OV_BACK, OV_ITEMS };
++       OV_PLAY, OV_SETTINGS, OV_BACK, OV_REFRESH, OV_ITEMS };
 +#define OV_MAX_ROWS 24
 +
 +enum { PG_DISPLAY, PG_GRAPHICS, PG_CONTROLS, PG_SYSTEM, PG_COUNT };
@@ -13763,22 +14226,7 @@ index 3430107..ea553d4 100644
 -        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
 -        wc.lpszClassName = "XboxRecompFramebuffer";
 -        RegisterClassA(&wc);
-+/* The held resolution, 0x0 (the desktop's) written as the desktop's size. */
-+static void display_held_res(int *w, int *h)
-+{
-+    const Monitor *m = &s_disp.mons[s_dp.mon];
-+    *w = s_dp.w ? s_dp.w : m->w;
-+    *h = s_dp.w ? s_dp.h : m->h;
-+}
-+
-+static void display_value(int item, char *value, size_t n)
-+{
-+    const Monitor *m;
-+    int w, h;
-+    if (!s_dp.held) {
-+        display_hold();
-+        s_dp.held = 0;              /* only read: nothing is held yet */
-     }
+-    }
 -    {
 -        /* RECOMP_WINDOW_SCALE (1-8, default 2, as in the SDL window): the
 -         * client area is the frame times this, made smaller until the window
@@ -13798,6 +14246,22 @@ index 3430107..ea553d4 100644
 -            if (scale <= 1 || (r.right - r.left <= work.right - work.left
 -                               && r.bottom - r.top <= work.bottom - work.top))
 -                break;
++/* The held resolution, 0x0 (the desktop's) written as the desktop's size. */
++static void display_held_res(int *w, int *h)
++{
++    const Monitor *m = &s_disp.mons[s_dp.mon];
++    *w = s_dp.w ? s_dp.w : m->w;
++    *h = s_dp.w ? s_dp.h : m->h;
++}
++
++static void display_value(int item, char *value, size_t n)
++{
++    const Monitor *m;
++    int w, h;
++    if (!s_dp.held) {
++        display_hold();
++        s_dp.held = 0;              /* only read: nothing is held yet */
++    }
 +    if (!s_disp.nmons) {
 +        snprintf(value, n, "-");
 +        return;
@@ -13816,28 +14280,31 @@ index 3430107..ea553d4 100644
 +        } else if (s_dp.mode == MODE_WINDOWED) {
 +            snprintf(value, n, "Fullscreen only");
 +        } else {
-+            int k;
++            display_held_res(&w, &h);
++            if (w == m->w && h == m->h)
++                snprintf(value, n, "%dx%d (desktop)", w, h);
++            else
++                snprintf(value, n, "%dx%d", w, h);
++        }
++        break;
++    case OV_REFRESH:
++        if (s_dp.mode != MODE_FULLSCREEN) {
++            snprintf(value, n, "Fullscreen only");
++        } else {
++            int k, hz;
 +            display_held_res(&w, &h);
 +            modes_load(m->dev);
 +            k = modes_find(w, h);
-+            if (w == m->w && h == m->h)
-+                snprintf(value, n, "%dx%d (desktop)", w, h);
-+            else if (k >= 0 && s_disp.modes[k].hz)
-+                snprintf(value, n, "%dx%d, %d Hz", w, h, s_disp.modes[k].hz);
++            hz = mode_hz(k);
++            if (s_cfg.refresh == REFRESH_AUTO)
++                snprintf(value, n, hz ? "Auto (%d Hz)" : "Auto", hz);
++            else if (s_cfg.refresh == REFRESH_MAX)
++                snprintf(value, n, hz ? "Highest (%d Hz)" : "Highest", hz);
 +            else
-+                snprintf(value, n, "%dx%d", w, h);
-         }
--        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
--                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
--                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
--                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
--                               r.right - r.left, r.bottom - r.top,
--                               NULL, NULL, GetModuleHandleA(NULL), NULL);
++                snprintf(value, n, "%d Hz", s_cfg.refresh);
++        }
 +        break;
-     }
--    if (!hwnd) {
--        InterlockedExchange(&s_fb_running, 0);
--        return 0;
++    }
 +}
 +
 +static void display_change(int item, int dir)
@@ -13877,12 +14344,7 @@ index 3430107..ea553d4 100644
 +        if (s_dp.w == m->w && s_dp.h == m->h)
 +            s_dp.w = s_dp.h = 0;    /* the desktop's own: no switch */
 +        break;
-     }
--    hdc = GetDC(hwnd);
--    {
--        const char *fs = getenv("RECOMP_FULLSCREEN");
--        if (fs && *fs && *fs != '0')
--            fb_toggle_fullscreen(hwnd);
++    }
 +}
 +
 +/* After the monitor is switched to a new resolution, Windows' own question:
@@ -13908,7 +14370,7 @@ index 3430107..ea553d4 100644
 +        s_keep.shown = -1;
 +    } else {
 +        ov_status("Display settings applied");
-     }
++    }
 +}
 +
 +/* The window loop's part: the countdown in the footer, and going back when
@@ -13960,6 +14422,7 @@ index 3430107..ea553d4 100644
 +        rows[n++] = OV_DISPMODE;
 +        rows[n++] = OV_MONITOR;
 +        rows[n++] = OV_RESOLUTION;
++        rows[n++] = OV_REFRESH;
 +        if (display_pending())
 +            rows[n++] = OV_APPLY;
 +        rows[n++] = OV_VSYNC;
@@ -14055,7 +14518,7 @@ index 3430107..ea553d4 100644
 +        "Widescreen (16:9)", "Anisotropic filtering", "Sharpening", "FXAA",
 +        "Frame generation", "FPS counter", "Rumble", "Stick dead zone", "Pause in background", "Take screenshot",
 +        "Save settings", "Restart now to apply", "Exit to Windows", "Resume",
-+        "Play", "Settings", "Back"
++        "Play", "Settings", "Back", "Refresh rate"
 +    };
 +    if (s_gpu_pending < 0)
 +        s_gpu_pending = s_cfg.gpu;
@@ -14066,7 +14529,8 @@ index 3430107..ea553d4 100644
 +    switch (i) {
 +    case OV_DISPMODE:
 +    case OV_MONITOR:
-+    case OV_RESOLUTION: display_value(i, value, n); break;
++    case OV_RESOLUTION:
++    case OV_REFRESH:    display_value(i, value, n); break;
 +    case OV_VSYNC:      snprintf(value, n, "%s", s_cfg.vsync ? "On" : "Off"); break;
 +    case OV_FILTER:     snprintf(value, n, "%s", s_cfg.filter == FILTER_SHARP ? "Sharp"
 +                                 : s_cfg.filter == FILTER_BILINEAR ? "Bilinear" : "Nearest"); break;
@@ -14122,7 +14586,7 @@ index 3430107..ea553d4 100644
 +    static const char *const help[OV_ITEMS] = {
 +        "Windowed, Borderless (the desktop's resolution) or Fullscreen (the resolution below). Alt+Enter or F11 also switch.",
 +        "The monitor the game shows on, numbered as Windows numbers them.",
-+        "Fullscreen's resolution, from the ones the monitor offers, at its highest refresh rate.",
++        "Fullscreen's resolution, from the ones the monitor offers, at the refresh rate below.",
 +        "Show the display mode, monitor and resolution chosen above. Closing the menu drops them.",
 +        "Wait for the display between frames: no tearing, slightly more input lag.",
 +        "How the picture is scaled to the window. Sharp keeps pixels crisp without shimmer.",
@@ -14144,7 +14608,8 @@ index 3430107..ea553d4 100644
 +        "Closes the game. Progress since your last save is lost.",
 +        "Back to the game.",
 +        NULL, NULL,
-+        "Back to the title. Your settings are saved."
++        "Back to the title. Your settings are saved.",
++        "Fullscreen's refresh rate. Auto picks a multiple of 60 (such as 120 Hz), so every frame stays up equally long."
 +    };
 +    return i >= 0 && i < OV_ITEMS ? help[i] : NULL;
 +}
@@ -14171,6 +14636,9 @@ index 3430107..ea553d4 100644
 +    ok &= WritePrivateProfileStringA("display", "monitor", s_disp.dev, s_ini);
 +    snprintf(v, sizeof v, "%dx%d", s_disp.full_w, s_disp.full_h);
 +    ok &= WritePrivateProfileStringA("display", "resolution", s_disp.full_w ? v : "desktop", s_ini);
++    snprintf(v, sizeof v, "%d", s_cfg.refresh);
++    ok &= WritePrivateProfileStringA("display", "refresh", s_cfg.refresh == REFRESH_AUTO ? "auto"
++                                     : s_cfg.refresh == REFRESH_MAX ? "max" : v, s_ini);
 +    ok &= WritePrivateProfileStringA("display", "fps_counter", s_cfg.fps_counter ? "1" : "0", s_ini);
 +    snprintf(v, sizeof v, "%d", s_cfg.window_scale);
 +    ok &= WritePrivateProfileStringA("display", "window_scale", v, s_ini);
@@ -14276,6 +14744,12 @@ index 3430107..ea553d4 100644
 +    case OV_DISPMODE:
 +    case OV_MONITOR:
 +    case OV_RESOLUTION: display_change(ov_current(), dir); break;
++    case OV_REFRESH:
++        /* Auto and Highest; a rate set in the ini comes back to Auto. */
++        s_cfg.refresh = s_cfg.refresh == REFRESH_AUTO ? REFRESH_MAX : REFRESH_AUTO;
++        if (s_disp.mode == MODE_FULLSCREEN && !s_launcher)
++            display_apply(hwnd, MODE_FULLSCREEN, s_disp.dev);   /* the new rate now */
++        break;
 +    case OV_VSYNC:      s_cfg.vsync = !s_cfg.vsync; break;
 +    case OV_FILTER:     s_cfg.filter = (s_cfg.filter + 3 + dir) % 3; break;
 +    case OV_SCALE:      s_cfg.scale = (s_cfg.scale + 3 + dir) % 3; break;
@@ -16303,8 +16777,14 @@ index 3430107..ea553d4 100644
 +            const RECT *r = &s_ov.rects[k];
 +            BitBlt(hdc, r->left, r->top, r->right - r->left, r->bottom - r->top,
 +                   s_ov.dc, r->left, r->top, SRCCOPY);
-+        }
-+    }
+         }
+-        hwnd = CreateWindowExA(0, "XboxRecompFramebuffer", "Xbox Recomp - Framebuffer",
+-                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+-                               work.left + ((work.right - work.left) - (r.right - r.left)) / 2,
+-                               work.top + ((work.bottom - work.top) - (r.bottom - r.top)) / 2,
+-                               r.right - r.left, r.bottom - r.top,
+-                               NULL, NULL, GetModuleHandleA(NULL), NULL);
+     }
 +}
 +
 +/* F12: the frame on screen, at the console's resolution. */
@@ -16337,6 +16817,17 @@ index 3430107..ea553d4 100644
 +    RECT r, wa;
 +    int use_d3d;
 +    LONG last_flips = -1;
++    LONG gpu_frames = 0, last_gpu_frames = -1;
++    int gpu_live = 0, gpu_new = 0;
++    /* the guest-vblank grid frames are shown on (see grid_repeat below) */
++    struct {
++        LONG     seen_frames;      /* the last published frame seen */
++        uint32_t seen_vbl;         /* the vblank it was seen at */
++        int      cand, cand_n, k;  /* the publish gap being counted, and the cadence */
++        uint32_t last_vbl;         /* the vblank the last new frame was shown at */
++        uint32_t shown_vbl;        /* the vblank anything was last shown at */
++    } grid = { -1, 0, 0, 0, 1, 0, 0 };
++    int grid_repeat = 0;
 +    uint32_t last_pvideo = 0;
 +    DWORD last_draw = 0;
 +    int need_resize = 0;
@@ -16345,6 +16836,8 @@ index 3430107..ea553d4 100644
 +
 +    dpi_aware();
 +    cfg_load_once();
++    frame_event();
++    xbox_vblank_notify = vblank_notify;     /* each guest vblank wakes this thread */
 +    {
 +        WNDCLASSA wc;
 +        memset(&wc, 0, sizeof(wc));
@@ -16366,15 +16859,20 @@ index 3430107..ea553d4 100644
 +                           CW_USEDEFAULT, CW_USEDEFAULT,
 +                           r.right - r.left, r.bottom - r.top,
 +                           NULL, NULL, GetModuleHandleA(NULL), NULL);
-+    if (!hwnd) {
-+        InterlockedExchange(&s_fb_running, 0);
-+        return 0;
-+    }
-+    hdc = GetDC(hwnd);
+     if (!hwnd) {
+         InterlockedExchange(&s_fb_running, 0);
+         return 0;
+     }
+     hdc = GetDC(hwnd);
+-    {
+-        const char *fs = getenv("RECOMP_FULLSCREEN");
+-        if (fs && *fs && *fs != '0')
+-            fb_toggle_fullscreen(hwnd);
+-    }
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -538,42 +3903,119 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -538,41 +4060,197 @@ static DWORD WINAPI fb_thread(LPVOID unused)
      bi.bmiHeader.biCompression = BI_RGB;
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
@@ -16476,11 +16974,78 @@ index 3430107..ea553d4 100644
 +        resized = InterlockedExchange(&s_resized, 0) != 0;
 +        need_resize |= resized;          /* kept until the next draw */
 +        fg_on = use_d3d && fg_live();
-+        fresh = fg_on || s_flips != last_flips || resized || s_ov.dirty
++        /* A new frame: on the GPU path one the back end has published
++         * (s_gpu_frames, see frame_event), else a flip. */
++        gpu_frames = s_gpu_frames;
++        gpu_live = use_d3d && s_gpu_handle && GetTickCount() - (DWORD)s_gpu_last_ms < 250;
++        gpu_new = gpu_frames != last_gpu_frames;
++        grid_repeat = 0;
++        /* Only on a variable-refresh display, which follows the grid. At
++         * 155 Hz a 60 Hz grid beats against the refresh (a match 77% of
++         * frames within 2 ms against 83% shown when drawn), and at a
++         * refresh the guest vblank is locked to the grid falls on the
++         * refresh edge, where a present makes that refresh or the next one
++         * by a hair: shown when drawn, the refresh lines frames up anyway. */
++        if (gpu_live && use_d3d && !fg_on && (xbox_VblankDisplayVaries() || grid_force())) {
++            /* Frames on the guest's 60 Hz grid. The back end publishes a
++             * frame when it has drawn it, a few ms after the vblank its
++             * work began on and by however long the drawing took; shown
++             * then, that scatter reaches the screen (a 30 fps match had one
++             * frame in ten 7 ms late on a variable-refresh display). The
++             * title meant it for a vblank: so a new frame waits for the
++             * guest vblank its cadence puts it on, k vblanks after the last
++             * one shown, and goes at once when it is already late. k is the
++             * spacing of the frames as they are published (1 at 60 fps,
++             * 2 at 30), the same gap three times running.
++             *
++             * And on a variable-refresh display (G-Sync, FreeSync), at 30 fps
++             * the vblank in between shows the frame again: below its range
++             * (about 48 Hz) the display repeats frames itself, and a new
++             * frame that comes during such a repeat waits for its scan-out.
++             * Never at 60 fps, where a repeat would land on the next frame.
++             * RECOMP_PRESENT_GRID=0 turns both off. */
++            static int on = -1;
++            uint32_t vb = xbox_VblankCount();
++            if (on < 0) {
++                const char *v = getenv("RECOMP_PRESENT_GRID");
++                on = !(v && *v == '0');
++            }
++            if (on && gpu_frames != grid.seen_frames) {
++                /* first sight of a published frame: its cadence */
++                uint32_t gap = grid.seen_vbl ? vb - grid.seen_vbl : 0;
++                grid.seen_frames = gpu_frames;
++                grid.seen_vbl = vb;
++                if (gap >= 1 && gap <= 4) {
++                    if ((int)gap == grid.cand) {
++                        if (++grid.cand_n >= 3)
++                            grid.k = (int)gap;
++                    } else {
++                        grid.cand = (int)gap;
++                        grid.cand_n = 1;
++                    }
++                }
++            }
++            /* Held only at k >= 2: at 60 fps a held frame is overwritten by
++             * the next one drawn within the same vblank, and lost. */
++            if (on && gpu_new && grid.k >= 2 && grid.last_vbl && vb - grid.last_vbl < (uint32_t)grid.k) {
++                gpu_new = 0;                       /* drawn early: wait for its vblank */
++            } else if (on && gpu_new) {
++                grid.last_vbl = vb;
++                grid.shown_vbl = vb;
++            } else if (on && have && grid.k >= 2 && grid.last_vbl && vb != grid.shown_vbl
++                       && vb - grid.last_vbl < (uint32_t)grid.k && xbox_VblankDisplayVaries()) {
++                grid_repeat = 1;                   /* the in-between frame */
++                grid.shown_vbl = vb;
++            }
++        }
++        fresh = fg_on || (gpu_live ? gpu_new : s_flips != last_flips) || grid_repeat
++                || resized || s_ov.dirty
 +                || xbox_PvideoChangeCount() != last_pvideo  /* a movie frame */
 +                || s_present_idx < 0 || GetTickCount() - last_draw >= 100;
 +        if (have && fresh) {
 +            last_flips = s_flips;
++            if (gpu_new || !gpu_live)
++                last_gpu_frames = gpu_frames;      /* a held frame stays new */
 +            last_pvideo = xbox_PvideoChangeCount();
 +            last_draw = GetTickCount();
 +            if (use_d3d) {
@@ -16489,6 +17054,9 @@ index 3430107..ea553d4 100644
 +                    d3d_resize();
 +                need_resize = 0;
 +                hr = d3d_present(hwnd);
++                if (SUCCEEDED(hr))
++                    xbox_PaceNotePresent(d3d.sc, gpu_live ? (uint32_t)gpu_frames : (uint32_t)s_flips,
++                                         s_fg_shown);
 +                if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
 +                    fprintf(stderr, "  [FBWIN] d3d11 device lost (0x%08lX): "
 +                            "falling back to gdi\n", (unsigned long)hr);
@@ -16503,13 +17071,21 @@ index 3430107..ea553d4 100644
 +            }
 +            if (!ov_visible())
 +                s_ov.dirty = 0;     /* the redraw that took it away is done */
++        }
++        if (use_d3d)
++            xbox_PacePoll(d3d.sc);
++        if (!use_d3d || !(s_cfg.vsync || (fg_on && s_fg_shown)) || !(have && fresh)) {
++            /* Until the next frame is ready or the next guest vblank (both
++             * set the event), not a fixed sleep: presented as soon as it may
++             * be, it makes the earliest refresh it can. */
++            if (frame_event())
++                WaitForSingleObject(s_frame_event, use_d3d ? 2 : 4);
++            else
++                Sleep(use_d3d ? 1 : 4);
          }
-+        if (!use_d3d || !(s_cfg.vsync || (fg_on && s_fg_shown)) || !(have && fresh))
-+            Sleep(use_d3d ? 1 : 4);
          {
              /* One dump a few seconds in, so the title has had time to render
-              * something rather than catching the first blank frame.
-@@ -584,45 +4026,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -584,45 +4262,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -16625,7 +17201,7 @@ index 3430107..ea553d4 100644
      return 0;
  }
  
-@@ -630,7 +4122,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -630,7 +4358,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -16634,7 +17210,7 @@ index 3430107..ea553d4 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -641,4 +4133,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -641,4 +4369,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
@@ -16694,6 +17270,275 @@ index 87b7ef7..2a10f70 100644
  /* The back slot is filled: make it the ready one. An unshown ready frame is
   * overwritten (dropped), never waited for. */
  static void publish(uint32_t bpp)
+diff --git a/src/video/pace_stats.c b/src/video/pace_stats.c
+new file mode 100644
+index 0000000..3f93bb0
+--- /dev/null
++++ b/src/video/pace_stats.c
+@@ -0,0 +1,231 @@
++/*
++ * pace_stats.c - how evenly the game's frames reach the screen.
++ *
++ * The window's presents go out on the display's refresh, the game's frames
++ * on the guest vblank. When the two clocks disagree a frame stays up longer
++ * than its neighbours (judder) though every frame was made. A present counter
++ * on our side cannot see that: a present that misses its refresh looks like
++ * any other. DXGI's frame statistics can, since they give the time of the
++ * vblank each present was actually shown at (SyncQPCTime).
++ *
++ * So each game frame's time on screen is measured, from the vblank it first
++ * showed at to the vblank the next one did. That works on a fixed-rate
++ * display (the times come in whole refreshes) and on a variable-refresh one
++ * (G-Sync / FreeSync, where the display refreshes when a frame arrives and
++ * counting refreshes says nothing). Every RECOMP_PACE_LOG_S seconds (10;
++ * 0 off) a line:
++ *
++ *   [PACE] 10.0 s: 600 frames shown, 60.0 fps; on screen median 16.7 ms,
++ *          99.5% within 2 ms of it, 3 longer; display 120.0 Hz; 0 never shown
++ *
++ * With frame generation the window presents frames of its own between the
++ * game's, so only the presents' own spacing is reported.
++ */
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define COBJMACROS
++#include <windows.h>
++#include <dxgi1_2.h>
++
++#include "pace_stats.h"
++
++/* The GPU back end's counts (nv2a_gpu_d3d11.cpp, in xbox_kernel). */
++void xbox_GpuPresentCounts(uint64_t *calls, uint64_t *no_surface,
++                           uint64_t *published, uint64_t *skipped);
++/* And the gaps between those published (fb_present.c). */
++void xbox_FramebufferWindowPublishGaps(long out[5]);
++
++#define RING     64
++#define SAMPLES  2048
++
++static struct {
++    int      log_s;             /* -1 not read yet, 0 off */
++    /* Presents not yet seen on screen: their present id and game frame. */
++    UINT     id[RING];
++    uint32_t frame[RING];
++    unsigned head, tail;
++    /* The last present seen on screen. */
++    int      have_last;
++    UINT     last_refresh;
++    uint32_t last_frame;
++    LONGLONG frame_start;       /* the vblank time the current game frame first showed at */
++    /* This window: each frame's time on screen, in 0.01 ms. */
++    unsigned dur[SAMPLES];
++    unsigned ndur, dropped, gen_presents, presents, replaced;
++    LARGE_INTEGER t0, freq;
++    UINT     refresh0;
++    char     summary[64];
++} s_ps = { -1 };
++
++static int cmp_u(const void *a, const void *b)
++{
++    unsigned x = *(const unsigned *)a, y = *(const unsigned *)b;
++    return x < y ? -1 : x > y;
++}
++
++static void ps_report(LARGE_INTEGER now, UINT refresh)
++{
++    double secs = (double)(now.QuadPart - s_ps.t0.QuadPart) / (double)s_ps.freq.QuadPart;
++    double hz = secs > 0 ? (refresh - s_ps.refresh0) / secs : 0;
++    static uint64_t c0, n0, p0, k0;
++    uint64_t c, n, p, k;
++
++    /* Where frames go missing before the window: flips the GPU back end was
++     * asked to show, with no surface, published, skipped (shared texture
++     * busy). */
++    xbox_GpuPresentCounts(&c, &n, &p, &k);
++    if (c != c0) {
++        long g[5];
++        xbox_FramebufferWindowPublishGaps(g);
++        fprintf(stderr, "  [PACE] GPU back end: %.1f flips a second to show, %.1f with no surface,"
++                        " %.1f published, %.1f skipped; gaps <4 ms %ld, 4-12 %ld, 12-20 %ld,"
++                        " 20-28 %ld, 28+ %ld\n", (c - c0) / secs, (n - n0) / secs,
++                (p - p0) / secs, (k - k0) / secs, g[0], g[1], g[2], g[3], g[4]);
++    }
++    c0 = c; n0 = n; p0 = p; k0 = k;
++
++    if (s_ps.gen_presents * 2 > s_ps.presents) {
++        fprintf(stderr, "  [PACE] %.1f s: frame generation, %u presents (%.1f a second);"
++                        " display %.1f Hz\n", secs, s_ps.presents, s_ps.presents / secs, hz);
++        snprintf(s_ps.summary, sizeof s_ps.summary, "%.0f shown", s_ps.presents / secs);
++    } else if (s_ps.ndur > 2) {
++        unsigned sorted[SAMPLES], med, i, even_n = 0, longer = 0;
++        memcpy(sorted, s_ps.dur, s_ps.ndur * sizeof sorted[0]);
++        qsort(sorted, s_ps.ndur, sizeof sorted[0], cmp_u);
++        med = sorted[s_ps.ndur / 2];
++        for (i = 0; i < s_ps.ndur; i++) {
++            if (s_ps.dur[i] + 200 >= med && s_ps.dur[i] <= med + 200)
++                even_n++;
++            else if (s_ps.dur[i] > med + 200)
++                longer++;
++        }
++        fprintf(stderr, "  [PACE] %.1f s: %u frames shown, %.1f fps; on screen median %.1f ms,"
++                        " %.1f%% within 2 ms of it, %u longer; p1 %.1f p99 %.1f max %.1f ms;"
++                        " display %.1f Hz; %u never shown; %u presents, %u replaced unseen\n",
++                secs, s_ps.ndur, s_ps.ndur / secs, med / 100.0, 100.0 * even_n / s_ps.ndur,
++                longer, sorted[s_ps.ndur / 100] / 100.0, sorted[s_ps.ndur * 99 / 100] / 100.0,
++                sorted[s_ps.ndur - 1] / 100.0, hz, s_ps.dropped, s_ps.presents, s_ps.replaced);
++        snprintf(s_ps.summary, sizeof s_ps.summary, "%.0f%% even", 100.0 * even_n / s_ps.ndur);
++    }
++    fflush(stderr);
++    s_ps.ndur = s_ps.dropped = s_ps.gen_presents = s_ps.presents = s_ps.replaced = 0;
++    s_ps.t0 = now;
++    s_ps.refresh0 = refresh;
++}
++
++/* Take what DXGI has shown since the last look. Its statistics name only the
++ * newest present on screen, so this runs after every present and on every
++ * pass of the window's loop: looked at only after presents, two presents
++ * shown in between read as one replaced unseen and a frame never shown. */
++static void ps_drain(IDXGISwapChain1 *sc)
++{
++    DXGI_FRAME_STATISTICS st;
++    LARGE_INTEGER now;
++
++    /* The ones before it in the ring were shown earlier or never. */
++    {
++        HRESULT hr = IDXGISwapChain1_GetFrameStatistics(sc, &st);
++        static int said;
++        static unsigned disjoint;
++        if (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT && ++disjoint == 600 && !said++)
++            fprintf(stderr, "  [PACE] frame statistics keep coming back disjoint;"
++                            " no [PACE] lines\n");
++        if (FAILED(hr) && hr != DXGI_ERROR_FRAME_STATISTICS_DISJOINT && !said++)
++            fprintf(stderr, "  [PACE] no frame statistics from the swap chain (0x%08lX);"
++                            " no [PACE] lines\n", (unsigned long)hr);
++        if (SUCCEEDED(hr) && !st.PresentCount && ++disjoint == 600 && !said++)
++            fprintf(stderr, "  [PACE] frame statistics show no present on screen;"
++                            " no [PACE] lines\n");
++        if (FAILED(hr) || !st.PresentCount)
++            return;
++    }
++    while (s_ps.head != s_ps.tail
++           && (int)(s_ps.id[s_ps.head % RING] - st.PresentCount) <= 0) {
++        UINT pid = s_ps.id[s_ps.head % RING];
++        uint32_t f = s_ps.frame[s_ps.head % RING];
++        s_ps.head++;
++        if (pid != st.PresentCount) {
++            s_ps.replaced++;                  /* replaced before it was shown */
++            continue;
++        }
++        QueryPerformanceCounter(&now);
++        if (!s_ps.t0.QuadPart) {
++            s_ps.t0 = now;
++            s_ps.refresh0 = st.PresentRefreshCount;
++        }
++        if (s_ps.have_last && f != s_ps.last_frame) {
++            LONGLONG d = st.SyncQPCTime.QuadPart - s_ps.frame_start;
++            if (d > 0 && s_ps.ndur < SAMPLES)
++                s_ps.dur[s_ps.ndur++] = (unsigned)(d * 100000 / s_ps.freq.QuadPart);
++            if (f - s_ps.last_frame > 1 && f - s_ps.last_frame < 1000)
++                s_ps.dropped += f - s_ps.last_frame - 1;
++            s_ps.frame_start = st.SyncQPCTime.QuadPart;
++        } else if (!s_ps.have_last) {
++            s_ps.frame_start = st.SyncQPCTime.QuadPart;
++        }
++        s_ps.have_last = 1;
++        s_ps.last_refresh = st.PresentRefreshCount;
++        s_ps.last_frame = f;
++        if ((now.QuadPart - s_ps.t0.QuadPart) >= (LONGLONG)s_ps.log_s * s_ps.freq.QuadPart)
++            ps_report(now, st.PresentRefreshCount);
++    }
++}
++
++/* One present has been queued: sc is the window's swap chain, frame the game
++ * frame it shows (the window's frame count), generated 1 for a frame
++ * generation present. Window thread only. */
++void xbox_PaceNotePresent(void *swap_chain, uint32_t frame, int generated)
++{
++    IDXGISwapChain1 *sc = (IDXGISwapChain1 *)swap_chain;
++    UINT id = 0;
++
++    if (s_ps.log_s < 0) {
++        const char *v = getenv("RECOMP_PACE_LOG_S");
++        s_ps.log_s = v ? atoi(v) : 10;
++        QueryPerformanceFrequency(&s_ps.freq);
++        fprintf(stderr, "  [PACE] pacing lines every %d s (RECOMP_PACE_LOG_S; 0 off)\n", s_ps.log_s);
++    }
++    if (!s_ps.log_s || !sc)
++        return;
++    {
++        HRESULT hr = IDXGISwapChain1_GetLastPresentCount(sc, &id);
++        static int said;
++        if (FAILED(hr)) {
++            if (!said++)
++                fprintf(stderr, "  [PACE] no present count from the swap chain (0x%08lX);"
++                                " no [PACE] lines\n", (unsigned long)hr);
++            return;
++        }
++    }
++    if (s_ps.tail - s_ps.head == RING)
++        s_ps.head++;                          /* never shown: forget the oldest */
++    s_ps.id[s_ps.tail % RING] = id;
++    s_ps.frame[s_ps.tail % RING] = frame;
++    s_ps.tail++;
++    s_ps.presents++;
++    if (generated)
++        s_ps.gen_presents++;
++    ps_drain(sc);
++}
++
++/* Every pass of the window's loop, presented or not. */
++void xbox_PacePoll(void *swap_chain)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *v = getenv("RECOMP_PACE_POLL");
++        on = !(v && *v == '0');
++    }
++    if (on && s_ps.log_s > 0 && swap_chain && s_ps.head != s_ps.tail)
++        ps_drain((IDXGISwapChain1 *)swap_chain);
++}
++
++/* The last report in a few words ("99% even"), "" before the first, for the
++ * FPS counter. */
++const char *xbox_PaceSummary(void)
++{
++    return s_ps.summary;
++}
+diff --git a/src/video/pace_stats.h b/src/video/pace_stats.h
+new file mode 100644
+index 0000000..ec01b24
+--- /dev/null
++++ b/src/video/pace_stats.h
+@@ -0,0 +1,26 @@
++/* pace_stats.h - how evenly the game's frames reach the screen (pace_stats.c). */
++#ifndef XBOX_PACE_STATS_H
++#define XBOX_PACE_STATS_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* After each present: the window's IDXGISwapChain1, the game frame shown and
++ * whether frame generation made it. Logs a [PACE] line every
++ * RECOMP_PACE_LOG_S seconds (10; 0 off). Window thread only. */
++void xbox_PaceNotePresent(void *swap_chain, uint32_t frame, int generated);
++/* Every pass of the window's loop, presented or not: DXGI names only the
++ * newest present on screen, so it is looked at often. */
++void xbox_PacePoll(void *swap_chain);
++
++/* The last report in a few words, "" before the first. */
++const char *xbox_PaceSummary(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* XBOX_PACE_STATS_H */
 diff --git a/src/video/pvideo_overlay.c b/src/video/pvideo_overlay.c
 new file mode 100644
 index 0000000..696e4e3
