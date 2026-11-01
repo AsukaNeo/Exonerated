@@ -10,6 +10,10 @@ game_files/
 *.png
 !assets/
 !assets/*.png
+# The settings menu's screenshots: our own UI and logo only, taken over
+# a plain background, with nothing from the game in them.
+!docs/images/
+!docs/images/*.png
 screenshots/
 texdump*/
 

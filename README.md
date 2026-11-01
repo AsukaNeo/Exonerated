@@ -37,8 +37,7 @@ Working well:
 - The game's own widescreen mode
 - Game speed that matches the Xbox (30 fps in matches, 60 in menus), with
   optional frame generation if you have a high refresh rate monitor
-- A title card with settings, a resizable window, fullscreen and an in-game
-  settings menu
+- A title card, and a settings menu laid out like a PC game's own (below)
 
 Still rough:
 
@@ -46,6 +45,49 @@ Still rough:
 - A few textures glitch here and there
 
 Not happening: online play and System Link.
+
+## Settings
+
+Press **F10**, or **Back+Start** on the pad, at any time. The settings sit
+under four tabs (Q/E, Tab or the bumpers switch them), each with a line
+explaining what it does, and the mouse works too.
+
+<p align="center">
+  <img src="docs/images/settings-display.png" alt="The settings menu, Display tab" width="820">
+</p>
+
+### Display
+- **Display mode**: Windowed, Borderless or Fullscreen. Fullscreen switches
+  your monitor to the resolution you pick. Alt+Tab gives your desktop back,
+  and it switches again when you return.
+- **Monitor**: the monitor the game shows on, numbered as Windows numbers
+  them.
+- **Resolution**: every resolution your monitor offers, at its highest refresh
+  rate. After a change the game asks whether to keep it, and goes back by
+  itself after 15 seconds, so a resolution your monitor can't show never
+  leaves you stuck.
+- **VSync**, **Scale** (fit, integer or stretch), **Widescreen** (the game's
+  own 16:9 mode), **Frame generation** and an **FPS counter**.
+
+### Graphics
+- **Renderer**: Direct3D 11 on the GPU, or the console's way on the CPU.
+- **Render resolution**: up to 4x the Xbox's (2560x1920), changed while you
+  play.
+- **Anisotropic filtering** up to 16x, **Sharpening** (AMD FidelityFX CAS) and
+  **FXAA**, plus the filter used to scale the picture to your window.
+
+### Controls
+- **Rumble** and an extra **stick dead zone** for worn sticks.
+
+### System
+- **Pause in background**: the game and its sound stop while the window is
+  in the background or minimised.
+- **Take screenshot**, **Save settings** and **Exit to Windows**.
+
+The display changes wait for "Apply display changes", as in Windows' own
+display settings. Settings that only take effect when the game starts offer a
+restart. Everything is saved to `exonerated.ini`; see
+[docs/settings.md](docs/settings.md).
 
 ## What you need
 
@@ -89,7 +131,7 @@ is Start, Z X C V are A B X Y, WASD moves and the arrow keys are the d-pad.
 | Key | What it does |
 |---|---|
 | F10, or Back+Start | Settings menu |
-| Alt+Enter or F11 | Fullscreen |
+| Alt+Enter or F11 | Windowed, or back to Borderless / Fullscreen |
 | F12 | Screenshot |
 
 The full key map, every setting in `exonerated.ini` and controller notes are in

@@ -10,11 +10,22 @@ and so does the mouse.
 
 ## The in-game settings menu
 
-Press F10, or Back+Start on the pad, while you play. Most things change on the
-spot: fullscreen, vsync, scaling and filtering, render resolution, the image
-options (anisotropic filtering, sharpening, FXAA, frame generation), the FPS
-counter, rumble and the stick dead zone. You can also take a screenshot from
-here, and Save settings writes it all to `exonerated.ini`.
+Press F10, or Back+Start on the pad, while you play. The settings sit under
+four tabs, Display, Graphics, Controls and System; switch with Q and E, Tab,
+Page Up/Down or the pad's bumpers, or click a tab. The line under the list
+explains the setting you're on, and the footer shows the keys or the pad's
+buttons, whichever you used last.
+
+Most things change on the spot: vsync, scaling and filtering, render
+resolution, the image options (anisotropic filtering, sharpening, FXAA, frame
+generation), the FPS counter, rumble, the stick dead zone and pausing in the
+background. Save settings (System tab) writes it all to `exonerated.ini`.
+
+Display mode, Monitor and Resolution wait for "Apply display changes", which
+shows up once you've changed one; closing the menu drops them. Fullscreen
+switches the monitor to the resolution you chose, and the menu then asks
+whether to keep it: Enter or A keeps it, and anything else, or 15 seconds
+passing, goes back.
 
 The renderer and widescreen can't change mid-game. Pick a new value and a
 "Restart now to apply" option shows up; it saves and restarts on the title
@@ -25,12 +36,16 @@ right, confirm with A or Enter, and close with B, Start or Esc. With the mouse,
 click a row to change it and right-click to go the other way. The game keeps
 running behind the menu but ignores your input while it's open.
 
+With "Pause in background" on (the default), the game and its sound stop
+while its window is in the background or minimised, and carry on when you come
+back. Movies are the exception: they keep playing, silently.
+
 ## Keys on the window
 
 | Key | What it does |
 |---|---|
 | F10, or Back+Start on the pad | Settings menu |
-| Alt+Enter or F11 | Borderless fullscreen |
+| Alt+Enter or F11 | Windowed, or back to the last full-screen mode |
 | F12 | Screenshot, saved in `screenshots/` |
 
 ## exonerated.ini
@@ -47,7 +62,11 @@ renderer=gpu       ; gpu (Direct3D 11, the default) or software
 vsync=1            ; 0 turns vsync off
 filter=sharp       ; sharp, bilinear or nearest, for scaling up to the window
 scale=fit          ; fit (4:3 with bars), integer or stretch
-fullscreen=0       ; 1 starts in fullscreen
+mode=windowed      ; windowed, borderless or fullscreen (older ini files'
+                   ; fullscreen=1 means borderless)
+monitor=           ; \\.\DISPLAY2 and so on; empty is the primary monitor
+resolution=desktop ; WxH for fullscreen, e.g. 1920x1080, or desktop
+pause_on_focus_loss=1 ; 0 keeps the game running in the background
 window_scale=2     ; starting window size, as a multiple of 640x480
 present=d3d11      ; gdi is a plain fallback if Direct3D gives you trouble
 fps_counter=0      ; 1 shows an FPS counter
