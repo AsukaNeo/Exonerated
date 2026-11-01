@@ -29,7 +29,7 @@ BUILD = os.path.join(ROOT, "build-release")
 DIST = os.path.join(ROOT, "dist")
 
 DEFAULT_INI = """; Exonerated settings. F10 (or Back+Start on a controller) opens the
-; settings overlay, which changes these and can save them.
+; settings menu, which changes these and can save them.
 [display]
 ; renderer: gpu (Direct3D 11) or software. render_scale (1-4, x 640x480)
 ; and widescreen (1 = 16:9) take effect at the next start.
@@ -39,9 +39,15 @@ widescreen=1
 vsync=1
 filter=sharp
 scale=fit
-fullscreen=0
+; mode: windowed, borderless or fullscreen. monitor: \\\\.\\DISPLAY2 and so on,
+; empty for the primary. resolution: WxH for fullscreen, or desktop.
+mode=windowed
+monitor=
+resolution=desktop
 window_scale=2
 fps_counter=0
+; pause_on_focus_loss: 1 stops the game and its sound in the background.
+pause_on_focus_loss=1
 ; anisotropy: 0 (the game's own) or 2-16. sharpen: 0 (off) to 100. fxaa: 0 or 1.
 anisotropy=0
 sharpen=0

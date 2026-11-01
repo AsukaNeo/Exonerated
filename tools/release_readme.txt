@@ -24,19 +24,26 @@ FIRST START
   4. The title card opens: Play, Settings or Exit to Windows. Use the
      arrow keys or d-pad and Enter or A, or the mouse.
 
-PICTURE
-  The game draws on your graphics card at twice the Xbox's resolution
-  (1280x960), in its own 16:9 widescreen mode, and its movies play in the
-  same window. Change it all under Settings on the title card, or with F10
-  while you play: Render resolution (1x-4x) changes at once; Renderer and
-  Widescreen offer "Restart now to apply". If the picture is wrong on your
-  graphics card, choose Renderer: Software.
+SETTINGS
+  Settings on the title card, or F10 (Back+Start on the pad) while you play.
+  Four tabs: Display, Graphics, Controls and System. Switch them with Q/E,
+  Tab or the bumpers. The line under the list explains each setting.
+  - Display mode: Windowed, Borderless or Fullscreen, on the monitor you
+    choose. Fullscreen uses the resolution you pick. After switching, the
+    game asks whether to keep it, and goes back by itself after 15 seconds.
+    These wait for "Apply display changes".
+  - The game draws on your graphics card at twice the Xbox's resolution
+    (1280x960), in its own 16:9 widescreen mode. Render resolution (1x-4x)
+    changes at once. Renderer and Widescreen offer "Restart now to apply".
+    If the picture is wrong on your graphics card, choose Renderer: Software.
+  - Pause in background (on by default): the game and its sound stop while
+    the window is in the background or minimised.
 
 CONTROLS
   Any Xbox-style controller works as player 1. Keyboard: Enter = Start,
   Z X C V = A B X Y, WASD to move, arrow keys for the d-pad.
-  F10 (or Back+Start on the pad): settings overlay, with Exit to Windows
-  Alt+Enter or F11: fullscreen          F12: screenshot
+  F10 (or Back+Start on the pad): settings, with Exit to Windows
+  Alt+Enter or F11: windowed / full screen          F12: screenshot
 
 IF SOMETHING GOES WRONG
   - "not the supported version": only the North American disc (version 3)
