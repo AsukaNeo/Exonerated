@@ -75,6 +75,8 @@ explaining what it does, and the mouse works too.
   play.
 - **Anisotropic filtering** up to 16x, **Sharpening** (AMD FidelityFX CAS) and
   **FXAA**, plus the filter used to scale the picture to your window.
+- **Shader**: RetroArch presets over the finished picture, with three CRT looks
+  and AMD FSR included (through [librashader](https://github.com/SnowflakePowered/librashader)).
 
 ### Controls
 - **Rumble** and an extra **stick dead zone** for worn sticks.

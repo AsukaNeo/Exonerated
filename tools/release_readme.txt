@@ -36,6 +36,9 @@ SETTINGS
     (1280x960), in its own 16:9 widescreen mode. Render resolution (1x-4x)
     changes at once. Renderer and Widescreen offer "Restart now to apply".
     If the picture is wrong on your graphics card, choose Renderer: Software.
+  - Shader, on the Graphics tab: RetroArch presets over the finished picture.
+    crt-lottes, crt-lottes-fast and crt-hyllian give a CRT look; fsr is AMD's
+    upscaler. Off by default; see shaders\README.txt.
   - Pause in background (on by default): the game and its sound stop while
     the window is in the background or minimised.
 
@@ -68,3 +71,6 @@ LEGAL
   Parts of the xboxrecomp toolkit compiled into it are LGPL-2.1 (from xemu);
   their source is available at https://github.com/sp00nznet/xboxrecomp and
   this project's patch at https://github.com/AsukaNeo/Exonerated.
+  The Shader setting uses librashader (MPL-2.0), included unmodified as
+  librashader.dll; where its source is, and its licence, are in the licenses
+  folder. The shader presets keep their own licences (shaders\README.txt).

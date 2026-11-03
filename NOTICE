@@ -16,6 +16,20 @@ patches/xboxrecomp-local.patch follow the design of xemu
 Copyright (c) espes, Jannik Vogel, Matt Borgerson). Credit to the xemu project:
   https://github.com/xemu-project/xemu
 
+The Shader setting runs RetroArch slang presets in librashader
+(MPL-2.0, https://github.com/SnowflakePowered/librashader). Release downloads
+include librashader.dll, built from its unmodified v0.12.0 source, with its
+licence, source location and third-party notices in the licenses folder.
+patches/xboxrecomp-local.patch adds src/video/librashader.h (MIT, Copyright 2022
+chyyran), unmodified, and src/video/fb_shader.c, which takes the idea of loading
+it at run time from apexJCL's xboxrecomp fork (MIT):
+  https://github.com/apexJCL/xboxrecomp
+
+assets/shaders holds copies of presets from libretro/slang-shaders, each file
+under its own header: crt-lottes (public domain, Timothy Lottes), crt-hyllian
+(MIT, Hyllian), fsr (Unlicense; ffx_a.h and ffx_fsr1.h MIT, AMD). See
+assets/shaders/README.txt.
+
 The present-time sharpening pass in patches/xboxrecomp-local.patch
 (src/video/fb_present.c) is adapted from AMD FidelityFX CAS (ffx_cas.h), MIT:
   https://github.com/GPUOpen-Effects/FidelityFX-CAS

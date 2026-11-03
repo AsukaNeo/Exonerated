@@ -10,13 +10,15 @@ no CI can build it. This script:
   1. configures build-release/ with -DDR_RELEASE=ON (no search of this
      machine's game folders; see CMakeLists.txt) and builds it;
   2. assembles dist/Exonerated-<version>/ from an allow-list: the exe, a short
-     player README, a default exonerated.ini and the licences;
+     player README, a default exonerated.ini, the shader presets and
+     librashader, and the licences;
   3. zips it, then checks the zip holds exactly the allow-list, no game files,
      and no copy of the game's default.xbe inside the exe.
 
 Nothing is published: upload the zip yourself (a GitHub release draft).
 """
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -33,8 +35,45 @@ DIST = os.path.join(ROOT, "dist")
 DEFAULT_INI = open(os.path.join(ROOT, "assets", "exonerated-defaults.ini"),
                    encoding="utf-8").read()
 
+# The Shader setting: the presets in assets/shaders, and the librashader build
+# that runs them. That build is made by hand once per version and isn't kept in
+# this repository; the hash stops any other zip from shipping by accident.
+LIBRASHADER_ZIP = os.environ.get("LIBRASHADER_ZIP") or os.path.join(
+    ROOT, "..", "..", "librashader-build", "out",
+    "librashader-x86_64-windows-d3d11-v0.12.0-asukaneo1.zip")
+LIBRASHADER_SHA256 = "a47c8a3be8677cedb4722360d680ca2c2fb6cf90df713a7b6dc06ba689e9c50d"
+# AMD's headers, which the FSR preset includes: the one place .h may ship.
+SHADER_HEADERS = ("shaders/edge-smoothing/fsr/shaders/ffx_a.h",
+                  "shaders/edge-smoothing/fsr/shaders/ffx_fsr1.h")
+
+
+def librashader_dir():
+    """Unpacks the pinned librashader zip under build-release/."""
+    if not os.path.isfile(LIBRASHADER_ZIP):
+        sys.exit("missing %s (set LIBRASHADER_ZIP)" % LIBRASHADER_ZIP)
+    got = hashlib.sha256(open(LIBRASHADER_ZIP, "rb").read()).hexdigest()
+    if got != LIBRASHADER_SHA256:
+        sys.exit("%s is not the pinned build: sha256 %s" % (LIBRASHADER_ZIP, got))
+    out = os.path.join(BUILD, "librashader")
+    with zipfile.ZipFile(LIBRASHADER_ZIP) as z:
+        z.extractall(out)
+    return out
+
+
+def shader_files():
+    """Published name -> source for everything in assets/shaders."""
+    root = os.path.join(ROOT, "assets", "shaders")
+    files = {}
+    for d, _, names in os.walk(root):
+        for n in names:
+            src = os.path.join(d, n)
+            files["shaders/" + os.path.relpath(src, root).replace(os.sep, "/")] = src
+    return files
+
+
 # Published name -> source. Nothing else may be in the zip.
 def allow_list(exe):
+    lib = librashader_dir()
     return {
         "Exonerated.exe": exe,
         "README.txt": None,                     # generated
@@ -44,6 +83,11 @@ def allow_list(exe):
         "licenses/xboxrecomp-LICENSE.txt": os.path.join(TOOLKIT, "LICENSE"),
         "licenses/xboxrecomp-NOTICE.txt": os.path.join(TOOLKIT, "NOTICE"),
         "licenses/LGPL-2.1.txt": os.path.join(TOOLKIT, "LICENSES", "LGPL-2.1.txt"),
+        "librashader.dll": os.path.join(lib, "librashader.dll"),
+        "licenses/librashader-LICENSE.txt": os.path.join(lib, "LICENSE.md"),
+        "licenses/librashader-SOURCE.txt": os.path.join(lib, "SOURCE.txt"),
+        "licenses/librashader-THIRDPARTY.txt": os.path.join(lib, "THIRDPARTY.txt"),
+        **shader_files(),
     }
 
 FORBIDDEN_EXT = (".xbe", ".iso", ".xiso", ".wmv", ".xmv", ".par", ".wav", ".bmp",
@@ -82,7 +126,7 @@ def verify(zip_path, names, exe_bytes):
         problems.append("zip contents differ from the allow-list: %s" %
                         sorted(set(rel) ^ set(names)))
     for n in rel:
-        if n.lower().endswith(FORBIDDEN_EXT):
+        if n.lower().endswith(FORBIDDEN_EXT) and n not in SHADER_HEADERS:
             problems.append("forbidden file type in zip: " + n)
     # The exe must not carry the game's own program file. Its header and a
     # few windows from inside it are looked for byte for byte.
@@ -157,6 +201,7 @@ def main():
     files = allow_list(exe)
     for dest, src in files.items():
         out = os.path.join(stage, *dest.split("/"))
+        os.makedirs(os.path.dirname(out), exist_ok=True)
         if src:
             if not os.path.isfile(src):
                 sys.exit("missing %s (for %s)" % (src, dest))
