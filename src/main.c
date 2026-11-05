@@ -1,33 +1,17 @@
 /**
- * YOUR_GAME_NAME - Recompiled Game Entry Point
+ * Exonerated: the Windows program that hosts Deathrow's recompiled code.
  *
- * This is the Windows executable that hosts the recompiled game code.
- * It performs the following initialization sequence:
+ * Start-up, in order:
  *
- * 1. Load the original XBE file from disk
- * 2. Initialize the Xbox memory layout (map data sections to original VAs)
- * 3. Initialize the Xbox kernel replacement layer
- * 4. Initialize the kernel bridge (thunk table in Xbox memory)
- * 5. Set up game file paths for I/O redirection
- * 6. Initialize the stack pointer
- * 7. Install VEH crash handler for diagnostics
- * 8. Call the game's original entry point (recompiled)
+ * 1. Find the player's game (importing it on a release build's first run)
+ *    and check it is the supported release
+ * 2. Load default.xbe and map its sections at their original addresses
+ * 3. Initialize the kernel replacement and its thunk table in Xbox memory
+ * 4. Point the Xbox drives at the game, saves and caches
+ * 5. Set up the stack and a crash handler for diagnostics
+ * 6. Call the game's entry point, recompiled
  *
- * Customize this file for your game:
- *   - Set YOUR_GAME_ENTRY_POINT to the XBE entry point address
- *   - Set YOUR_GAME_XBE_PATH to where the XBE file lives
- *   - Set YOUR_GAME_DIR to the game data directory
- *   - Add any CRT global pre-initialization your game needs
- *   - Customize the VEH handler for game-specific crash diagnosis
- *
- * XBE Details (fill in from xbe_parser output):
- *   Title:       YOUR_GAME_NAME
- *   Title ID:    0x00000000
- *   Base addr:   0x00010000
- *   Entry point: 0x00000000
- *   Code size:   ~??? KB (.text)
- *   Sections:    ?? (list them)
- *   Kernel imports: ??
+ * The game: Deathrow, North American release (version 3), title ID 0x55530004.
  */
 
 #include <windows.h>
@@ -80,11 +64,8 @@ extern ptrdiff_t g_xbox_mem_offset;
 
 /* ── XBE Constants ─────────────────────────────────────────── */
 
-/*
- * TODO: Set these from your xbe_parser output.
- * Run: py -3 -m tools.xbe_parser game/default.xbe
- */
-#define YOUR_GAME_ENTRY_POINT   0x0018E88A
+/* The XBE's entry point, from: py -3 -m tools.xbe_parser game/default.xbe */
+#define DR_ENTRY_POINT   0x0018E88A
 
 /* Where the game's files (default.xbe and its data folder) are, found at
  * start-up rather than fixed at build time, so a build runs wherever it is
@@ -98,8 +79,6 @@ extern ptrdiff_t g_xbox_mem_offset;
 #endif
 static char s_game_dir[MAX_PATH];
 static char s_game_xbe[MAX_PATH];
-#define YOUR_GAME_DIR           s_game_dir
-#define YOUR_GAME_XBE_PATH      s_game_xbe
 
 static int dr_try_game_dir(const char *dir)
 {
@@ -506,9 +485,7 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
         /*
          * GPU register probe at 0xFD000000 range.
          * Some games probe NV2A registers directly. On real hardware this
-         * returns GPU state; here we just skip the instruction.
-         * TODO: Implement mini x86-64 decoder for instruction skipping,
-         * or connect to the xbox_nv2a library for proper handling.
+         * returns GPU state. Deathrow doesn't, so it's left to the next handler.
          */
         if (fault_addr >= 0xFD000000 && fault_addr < 0xFE000000) {
             return EXCEPTION_CONTINUE_SEARCH;
@@ -578,18 +555,6 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             fflush(stderr);
         }
 
-        /*
-         * TODO: Add game-specific diagnostics here. Examples:
-         *
-         * Dump CRT heap handle:
-         *   uint32_t heap = *(uint32_t *)((uint8_t *)g_xbox_mem_offset + HEAP_HANDLE_VA);
-         *   fprintf(stderr, "  CRT heap handle: 0x%08X\n", heap);
-         *
-         * Dump game state:
-         *   uint32_t state = *(uint32_t *)((uint8_t *)g_xbox_mem_offset + GAME_STATE_VA);
-         *   fprintf(stderr, "  Game state: %u\n", state);
-         */
-
         /* Print native stack return addresses for debugging. The exe loads
          * wherever ASLR puts it, so test against the real image range and
          * print RVAs ("rip rva" so sym.py < log resolves them too). [cr3] */
@@ -639,7 +604,7 @@ static void deathrow_path_hook(const char *xp)
     if (n < 4 || _stricmp(m + n - 4, ".wmv") != 0) return;
     if (_stricmp(m, last) == 0 || xbox_VideoIsPlaying()) return;
     strncpy(last, m, sizeof(last) - 1);
-    snprintf(host, sizeof(host), "%s\\data\\%s", YOUR_GAME_DIR, m);
+    snprintf(host, sizeof(host), "%s\\data\\%s", s_game_dir, m);
     fprintf(stderr, "[FMV] playing %s\n", host);
     if (getenv("DR_FMV_WINDOW") && strcmp(getenv("DR_FMV_WINDOW"), "0"))
         xbox_VideoPlayFile(host);
@@ -680,7 +645,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 #endif
 
-    printf("=== YOUR_GAME_NAME - Static Recompilation ===\n");
+    printf("=== Exonerated ===\n");
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
@@ -732,7 +697,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
     fprintf(stderr, "[BOOT] game files: %s\n", s_game_dir);
-    if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
+    if (!load_xbe(s_game_xbe, &xbe_data, &xbe_size)) {
         MessageBoxA(NULL, "Failed to load default.xbe from the game folder.",
                     "Exonerated", MB_ICONERROR);
         return 1;
@@ -802,7 +767,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         save_dir = dr_portable_data(old_dir[0] ? old_dir : NULL);
         dr_portable_saves(old_dir[0] ? old_dir : NULL);
 #endif
-        xbox_path_init(YOUR_GAME_DIR, save_dir);
+        xbox_path_init(s_game_dir, save_dir);
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
@@ -816,22 +781,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 6: Initialize stack */
     g_esp = XBOX_STACK_TOP;
 
-    /*
-     * TODO: Pre-initialize CRT globals if needed.
-     *
-     * Many Xbox games use the MSVC CRT. The CRT's __heap_init sets up a
-     * heap descriptor at a game-specific address. You may need to
-     * pre-initialize __active_heap to avoid small-block heap issues:
-     *
-     *   uint32_t *active_heap = (uint32_t *)((uint8_t *)g_xbox_mem_offset + ACTIVE_HEAP_VA);
-     *   *active_heap = 1;  // 1 = system heap (HeapAlloc), avoids SBH init
-     *
-     * Find ACTIVE_HEAP_VA by searching the disassembly for __heap_init
-     * or by looking for the CRT's __active_heap global in the data section.
-     */
-
     printf("\n=== Initialization complete ===\n");
-    printf("Entry point: 0x%08X\n", YOUR_GAME_ENTRY_POINT);
+    printf("Entry point: 0x%08X\n", DR_ENTRY_POINT);
     printf("ESP: 0x%08X\n", g_esp);
 
     /* Build the flat dispatch table before the guest runs.

@@ -59,14 +59,15 @@ It has to be built on a machine with the game, because the code is lifted
 from the game's own `default.xbe`, so there's no CI for it.
 
 ```bash
-py -3 tools/make_release.py --version 0.9.1-beta
+py -3 tools/make_release.py --version 0.9.8-beta
 ```
 
 The script won't run if either repo has uncommitted changes. `--allow-dirty`
 gets around that for a test build, which is then marked `-dirty` and isn't
 meant for upload. It builds into `build-release/`, puts the zip together in
 `dist/`, and fails if anything unexpected ends up in it or if the exe
-contains bytes from the game. Upload the zip yourself, as a draft release
+contains raw bytes from the game's `default.xbe`. It also writes a
+`SHA256SUMS.txt` beside the zip. Upload both yourself, as a draft release
 first.
 
 What the player sees: with no game found, the program asks for the disc

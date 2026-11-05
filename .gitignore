@@ -19,7 +19,7 @@ texdump*/
 
 # Builds and release zips
 build/
-build-release/
+build-*/
 dist/
 
 # Logs and scratch output from runs

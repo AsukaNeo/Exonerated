@@ -19,7 +19,8 @@ buttons, whichever you used last.
 Most things change on the spot: vsync, scaling and filtering, render
 resolution, the image options (anisotropic filtering, sharpening, FXAA, frame
 generation), the FPS counter, rumble, the stick dead zone and pausing in the
-background. Save settings (System tab) writes it all to `exonerated.ini`.
+background. Save settings (System tab) writes it all to `exonerated.ini`, and
+Restore defaults on each tab puts that tab back to how the download ships.
 
 Display mode, Monitor and Resolution wait for "Apply display changes", which
 shows up once you've changed one; closing the menu drops them. Fullscreen
@@ -66,6 +67,7 @@ mode=windowed      ; windowed, borderless or fullscreen (older ini files'
                    ; fullscreen=1 means borderless)
 monitor=           ; \\.\DISPLAY2 and so on; empty is the primary monitor
 resolution=desktop ; WxH for fullscreen, e.g. 1920x1080, or desktop
+refresh=auto       ; for fullscreen: auto, max, or a rate your monitor offers
 pause_on_focus_loss=1 ; 0 keeps the game running in the background
 window_scale=2     ; starting window size, as a multiple of 640x480
 present=d3d11      ; gdi is a plain fallback if Direct3D gives you trouble
@@ -76,6 +78,7 @@ widescreen=0       ; 1 uses the game's own 16:9 mode (the download starts at 1)
 anisotropy=0       ; 2, 4, 8 or 16 keeps the floor and walls sharp at an angle
 sharpen=0          ; 1 to 100, AMD FidelityFX CAS sharpening; 0 is off
 fxaa=0             ; 1 smooths jagged edges
+shader=off         ; off, or a preset from the shaders folder, e.g. crt-lottes
 frame_gen=off      ; blend or motion: fills a high refresh rate display with
                    ; in-between frames (see below)
 
@@ -90,8 +93,8 @@ use `RECOMP_PB_BACKEND=d3d11` or `cpu`.
 
 A few notes:
 
-- Render scale, anisotropy, sharpening, FXAA and frame generation only apply to
-  the GPU renderer.
+- Render scale, anisotropy, sharpening, FXAA, shaders and frame generation only
+  apply to the GPU renderer.
 - In widescreen the HUD uses the game's own 16:9 layout. The movies were made
   for 4:3, so they stretch, just like on a widescreen TV.
 - Frame generation doesn't speed the game up. It adds frames in between the

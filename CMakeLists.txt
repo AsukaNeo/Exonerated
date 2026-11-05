@@ -1,14 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-# ============================================================================
-# YOUR_GAME_NAME - Static Recompilation
-#
-# Copy this template to your game project root and customize:
-#   1. Change the project name below
-#   2. Set XBOXRECOMP_DIR to where you cloned xboxrecomp
-#   3. Adjust source file lists as you add game-specific code
-#   4. Add any game-specific compile definitions or link libraries
-# ============================================================================
+# Exonerated: Deathrow (Xbox) recompiled for Windows. XBOXRECOMP_DIR is the
+# toolkit checkout with patches/xboxrecomp-local.patch applied; build.bat sets
+# it up. See docs/developers.md.
 
 project(deathrow_recomp C)
 # add_compile_definitions(RECOMP_ABI_CHECK)

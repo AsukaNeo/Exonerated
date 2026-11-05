@@ -1,9 +1,13 @@
 Exonerated
 Copyright (c) 2026 AsukaNeo. Licensed under the MIT License (see LICENSE).
 
-This project contains no game code, data or assets. It covers only original
-source files, scripts and a patch against xboxrecomp; you must supply your own
-legally obtained copy of the game.
+This repository contains no game code, data or assets. It covers only original
+source files, scripts and a patch against xboxrecomp. Release downloads hold the
+program, which contains code translated from the game's executable, and no game
+data or assets. You must supply your own legally obtained copy of the game.
+
+Exonerated is not affiliated with, endorsed by or sponsored by Ubisoft, Southend
+Interactive or Microsoft. Deathrow and Xbox belong to their owners.
 
 Builds on xboxrecomp by sp00nz and contributors (MIT):
   https://github.com/sp00nznet/xboxrecomp

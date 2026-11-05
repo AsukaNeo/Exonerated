@@ -1,0 +1,47 @@
+name: Bug report
+description: Something crashes, looks wrong or doesn't respond
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for reporting. Please don't attach or link game files, disc
+        images, extracted assets or generated code. Describing what you saw is
+        enough.
+  - type: input
+    id: version
+    attributes:
+      label: Exonerated version
+      description: From the zip's name, or `dev` if you built it yourself.
+      placeholder: 0.9.7-beta
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Windows version and graphics card
+      placeholder: Windows 11, NVIDIA RTX 3060
+    validations:
+      required: true
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      description: Graphics tab of the settings menu.
+      options:
+        - GPU
+        - Software
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you were doing, what you expected and what you got. Say which arena or menu if it's a graphics problem, and whether it also happens on Renderer Software.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Attach `xbox_kernel.log` from the game's folder if it crashed or hung.

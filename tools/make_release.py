@@ -224,7 +224,13 @@ def main():
         for p in problems:
             print("PROBLEM:", p)
         sys.exit("the zip failed its checks; do not publish it")
+    digest = hashlib.sha256(open(zip_path, "rb").read()).hexdigest()
+    with open(os.path.join(DIST, "SHA256SUMS.txt"), "w", newline="
+") as f:
+        f.write("%s  %s
+" % (digest, os.path.basename(zip_path)))
     print("ok: %s (%.1f MB)" % (zip_path, os.path.getsize(zip_path) / 1048576.0))
+    print("sha256: %s" % digest)
 
 
 if __name__ == "__main__":

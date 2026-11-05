@@ -49,6 +49,9 @@ CONTROLS
   Alt+Enter or F11: windowed / full screen          F12: screenshot
 
 IF SOMETHING GOES WRONG
+  - Windows or an antivirus warns about the exe: it isn't code signed, so
+    SmartScreen may call it an unknown publisher (More info, then Run anyway).
+    Each download's checksum is on its release page.
   - "not the supported version": only the North American disc (version 3)
     works, because Exonerated is built from that exact program.
   - Settings live in exonerated.ini next to Exonerated.exe; delete it to go
@@ -66,8 +69,10 @@ IF SOMETHING GOES WRONG
 
 LEGAL
   Exonerated is MIT-licensed open source (see the licenses folder). It is an
-  independent fan project, not affiliated with the rights holders of Deathrow
-  or with Microsoft. It contains no game data and runs only on your own copy.
+  unofficial, free fan project, not affiliated with, endorsed by or sponsored
+  by Ubisoft, Southend Interactive or Microsoft. The program contains code
+  translated from the game's executable, and no textures, models, sound, music,
+  movies, levels or disc files. It runs only on your own copy of the game.
   Parts of the xboxrecomp toolkit compiled into it are LGPL-2.1 (from xemu);
   their source is available at https://github.com/sp00nznet/xboxrecomp and
   this project's patch at https://github.com/AsukaNeo/Exonerated.

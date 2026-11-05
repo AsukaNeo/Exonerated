@@ -1,22 +1,32 @@
 <p align="center">
-  <img src="assets/exonerated-logo.png" alt="Exonerated" width="720">
+  <img src="assets/exonerated-banner.png" alt="Exonerated" width="720">
 </p>
 
 <p align="center">
-  <b><i>Deathrow</i> for the original Xbox, recompiled to run natively on Windows.</b>
+  <b><i>Deathrow</i> for the original Xbox, recompiled to run natively on Windows.</b><br>
+  You bring your own copy of the game.
 </p>
 
 <p align="center">
-  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-orange">
+  <a href="https://github.com/AsukaNeo/Exonerated/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AsukaNeo/Exonerated?include_prereleases&label=download&color=c8102e"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
   <img alt="Original: Xbox" src="https://img.shields.io/badge/original-Xbox-107C10">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/AsukaNeo/Exonerated/releases/latest"><b>Download</b></a>
+  &nbsp;·&nbsp; <a href="#getting-started">Getting started</a>
+  &nbsp;·&nbsp; <a href="#settings">Settings</a>
+  &nbsp;·&nbsp; <a href="#if-something-goes-wrong">Troubleshooting</a>
+  &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
+  &nbsp;·&nbsp; <a href="https://github.com/AsukaNeo/Exonerated/issues/new/choose">Report a bug</a>
 </p>
 
 > [!NOTE]
 > This is a beta. Full matches play from start to finish and Conquest works,
 > but there are still graphics glitches here and there. If you hit something,
-> please [open an issue](https://github.com/AsukaNeo/Exonerated/issues).
+> please [open an issue](https://github.com/AsukaNeo/Exonerated/issues/new/choose).
 
 ## What is this?
 
@@ -25,7 +35,20 @@ behind it is long gone. Exonerated takes the game's own code, turns it into C
 and builds it for a modern PC. No emulator involved, and you get a few modern
 comforts on top.
 
-You need your own copy of the game. Nothing from it is included here.
+You need your own copy of the game. All of its art, sound, levels and movies
+come from your copy, and none of them are included here.
+
+## What you get
+
+| | Xbox | Exonerated |
+|---|---|---|
+| Resolution | 640x480 | Up to 2560x1920, changed while you play |
+| Picture | 4:3 | The game's own 16:9 mode, or 4:3 |
+| Frame rate | 30 in matches, 60 in menus | The same game speed, plus optional frame generation for high refresh rate monitors |
+| Image options | None | Anisotropic filtering, sharpening, FXAA and RetroArch shaders (CRT looks, AMD FSR) |
+| Display | Your TV | Windowed, Borderless or Fullscreen, on any monitor |
+| Controls | Xbox pad | Any Xbox-style controller with rumble, or the keyboard |
+| Saves | The console's hard drive | A `saves` folder next to the exe, so the whole thing is portable |
 
 ## Where it's at
 
@@ -33,11 +56,8 @@ Working well:
 
 - Full matches, Conquest, menus and all the movies
 - Sound, controllers with rumble, and the keyboard
-- A Direct3D 11 renderer that can draw at up to 4x the Xbox's resolution
-- The game's own widescreen mode
-- Game speed that matches the Xbox (30 fps in matches, 60 in menus), with
-  optional frame generation if you have a high refresh rate monitor
-- A title card, and a settings menu laid out like a PC game's own (below)
+- Game speed that matches the Xbox
+- A title card, and a settings menu laid out like a PC game's own
 
 Still rough:
 
@@ -45,6 +65,50 @@ Still rough:
 - A few textures glitch here and there
 
 Not happening: online play and System Link.
+
+Things I'd like to get to: the last graphics glitches, testing on more graphics
+cards, button remapping, custom soundtracks and a Linux / Steam Deck build. Help
+with any of them is welcome.
+
+## Getting started
+
+**What you need:**
+
+- *Deathrow* for the original Xbox, the **North American release (version 3)**,
+  either as a disc image (`.iso`) or as its files (`default.xbe` and the
+  `data` folder)
+- 64-bit Windows 10 or 11 and a graphics card that does Direct3D 11
+- About 2 GB of free disk space
+
+**Then:**
+
+1. Grab the latest `Exonerated-…-windows-x64.zip` from
+   [Releases](https://github.com/AsukaNeo/Exonerated/releases/latest) and unzip
+   it wherever you like.
+2. Run `Exonerated.exe` and point it at your disc image or `default.xbe`. It
+   checks that it's the right release, then copies the game into a `game`
+   folder next to the exe. That only happens the first time.
+3. You'll land on the title card: Play, Settings or Exit.
+
+<p align="center">
+  <img src="docs/images/title-card.png" alt="The title card: Play, Settings, Exit to Windows" width="520">
+</p>
+
+To update, unzip the new version over the old one. Your game, saves and settings
+stay put.
+
+## Controls
+
+Any Xbox-style controller works and plays as player 1. On the keyboard, Enter
+is Start, Z X C V are A B X Y, WASD moves and the arrow keys are the d-pad.
+
+| Key | What it does |
+|---|---|
+| F10, or Back+Start | Settings menu |
+| Alt+Enter or F11 | Windowed, or back to Borderless / Fullscreen |
+| F12 | Screenshot |
+
+The full key map is in [docs/settings.md](docs/settings.md#controller).
 
 ## Settings
 
@@ -62,14 +126,18 @@ explaining what it does, and the mouse works too.
   and it switches again when you return.
 - **Monitor**: the monitor the game shows on, numbered as Windows numbers
   them.
-- **Resolution**: every resolution your monitor offers, at its highest refresh
-  rate. After a change the game asks whether to keep it, and goes back by
-  itself after 15 seconds, so a resolution your monitor can't show never
-  leaves you stuck.
+- **Resolution** and **Refresh rate**: everything your monitor offers. After a
+  change the game asks whether to keep it, and goes back by itself after 15
+  seconds, so a resolution your monitor can't show never leaves you stuck.
 - **VSync**, **Scale** (fit, integer or stretch), **Widescreen** (the game's
   own 16:9 mode), **Frame generation** and an **FPS counter**.
 
 ### Graphics
+
+<p align="center">
+  <img src="docs/images/settings-graphics.png" alt="The settings menu, Graphics tab" width="820">
+</p>
+
 - **Renderer**: Direct3D 11 on the GPU, or the console's way on the CPU.
 - **Render resolution**: up to 4x the Xbox's (2560x1920), changed while you
   play.
@@ -86,27 +154,35 @@ explaining what it does, and the mouse works too.
   in the background or minimised.
 - **Take screenshot**, **Save settings** and **Exit to Windows**.
 
-The display changes wait for "Apply display changes", as in Windows' own
-display settings. Settings that only take effect when the game starts offer a
-restart. Everything is saved to `exonerated.ini`; see
-[docs/settings.md](docs/settings.md).
+Each tab has **Restore defaults**. The display changes wait for "Apply display
+changes", as in Windows' own display settings. Settings that only take effect
+when the game starts offer a restart. Everything is saved to `exonerated.ini`;
+see [docs/settings.md](docs/settings.md).
 
-## What you need
+## If something goes wrong
 
-- *Deathrow* for the original Xbox, the **North American release (version 3)**,
-  either as a disc image (`.iso`) or as its files (`default.xbe` and the
-  `data` folder)
-- 64-bit Windows 10 or 11 and a graphics card that does Direct3D 11
+**Windows or my antivirus warns about the exe.** The exe isn't code signed, so
+SmartScreen may say it's from an unknown publisher (More info → Run anyway), and
+a few antivirus tools don't like unsigned programs. The checksum of each download
+is on its release page, and you can always
+[build it yourself](#building-it-yourself).
 
-## Playing the download
+**"Not the supported version".** Only the North American disc (version 3) works,
+because Exonerated is built from that exact program.
 
-1. Grab the latest `Exonerated-…-windows-x64.zip` from
-   [Releases](https://github.com/AsukaNeo/Exonerated/releases) and unzip it
-   wherever you like.
-2. Run `Exonerated.exe` and point it at your disc image or `default.xbe`. It
-   checks that it's the right release, then copies the game into a `game`
-   folder next to the exe. That only happens the first time.
-3. You'll land on the title card: Play, Settings or Exit.
+**The picture looks wrong.** Try Renderer: Software on the Graphics tab. It's
+slower and stuck at the Xbox's resolution, but it draws as the console did. Then
+please tell me about your graphics card in an issue.
+
+**It won't start, or it crashes.** Open an
+[issue](https://github.com/AsukaNeo/Exonerated/issues/new/choose) and attach
+`xbox_kernel.log` from the game's folder. Please don't attach game files.
+
+**I want to go back to the default settings.** Use Restore defaults in the menu,
+or delete `exonerated.ini`.
+
+**Where are my saves?** In the `saves` folder next to the exe. Copy the whole
+folder to another PC or drive and everything comes along.
 
 ## Building it yourself
 
@@ -125,28 +201,24 @@ to PATH") and [Git for Windows](https://git-scm.com/download/win).
 If `build.bat` stops, it tells you what's missing. Install that and run it
 again. Everything it printed is in `build.log`.
 
-## Controls
-
-Any Xbox-style controller works and plays as player 1. On the keyboard, Enter
-is Start, Z X C V are A B X Y, WASD moves and the arrow keys are the d-pad.
-
-| Key | What it does |
-|---|---|
-| F10, or Back+Start | Settings menu |
-| Alt+Enter or F11 | Windowed, or back to Borderless / Fullscreen |
-| F12 | Screenshot |
-
-The full key map, every setting in `exonerated.ini` and controller notes are in
-[docs/settings.md](docs/settings.md). If you want to build or poke at the code,
-start with [docs/developers.md](docs/developers.md).
+If you want to poke at the code, start with
+[docs/developers.md](docs/developers.md).
 
 ## Credits
 
 - [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) by sp00nz and
   contributors, which this whole project is built on
 - [xemu](https://github.com/xemu-project/xemu), our reference for how the Xbox
-  hardware behaves (see [NOTICE](NOTICE))
+  hardware behaves
+- [librashader](https://github.com/SnowflakePowered/librashader) and the
+  [libretro shaders](https://github.com/libretro/slang-shaders), for the Shader
+  setting
+- apexJCL's [xboxrecomp fork](https://github.com/apexJCL/xboxrecomp), for showing
+  how to run those on Direct3D 11
+- AMD's FidelityFX CAS and FSR
 - A professional coder's input throughout
+
+Licences and details for all of these are in [NOTICE](NOTICE).
 
 ## AI assistance
 
@@ -154,8 +226,19 @@ AI (**Claude Opus 5.5**) was used as a development assistant for the intensely t
 
 ## Legal
 
+Exonerated is an unofficial, free fan project. It isn't affiliated with, endorsed
+by or sponsored by Ubisoft, Southend Interactive or Microsoft. *Deathrow* and Xbox
+belong to their owners and are named only to say what this works with. No logo,
+box art or other artwork from the game is used; the Exonerated logo was made for
+this project.
+
+**This repo** holds no game code, data or assets: only original source, scripts
+and a patch against xboxrecomp.
+
+**The download** holds the program, which contains code translated from the
+game's executable, and no textures, models, sound, music, movies, levels or disc
+files. It does nothing without your own copy of the game, which it checks at
+every start. Please don't ask for game files or disc images, and don't share them.
+
 The MIT licence ([LICENSE](LICENSE), [NOTICE](NOTICE)) covers this project's own
-code. Exonerated is an unofficial fan project with no connection to the owners
-of *Deathrow* or to Microsoft, and their names and marks belong to them. No
-game code, data or assets are included, and it only runs on your own copy of
-the game.
+code. The software comes as is, without warranty of any kind.
