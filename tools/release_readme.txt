@@ -2,8 +2,8 @@ EXONERATED {version}
 A recompilation of Deathrow for the original Xbox, running natively on Windows.
 https://github.com/AsukaNeo/Exonerated
 
-This is a beta. Full matches play from start to finish; expect some graphics
-glitches. Report problems at https://github.com/AsukaNeo/Exonerated/issues
+Full matches play from start to finish and Conquest works; a few small
+graphics glitches remain. Report problems at https://github.com/AsukaNeo/Exonerated/issues
 (describe what happened; never attach game files).
 
 WHAT YOU NEED
@@ -20,7 +20,8 @@ FIRST START
      into a "game" folder here, movies and all. This happens only once
      (about 1.1 GB).
   You can also drag the .iso onto Exonerated.exe. Everything then lives in
-  this one folder: Exonerated.exe, exonerated.ini, game and saves.
+  this one folder: Exonerated.exe, exonerated.ini (written on the first
+  start), game and saves.
   4. The title card opens: Play, Settings or Exit to Windows. Use the
      arrow keys or d-pad and Enter or A, or the mouse.
 
@@ -51,21 +52,25 @@ CONTROLS
 IF SOMETHING GOES WRONG
   - Windows or an antivirus warns about the exe: it isn't code signed, so
     SmartScreen may call it an unknown publisher (More info, then Run anyway).
-    Each download's checksum is on its release page.
+    Windows 11's Smart App Control blocks unsigned programs outright, with no
+    way to run them while it is on. Each download's checksum is on its
+    release page.
   - "not the supported version": only the North American disc (version 3)
     works, because Exonerated is built from that exact program.
   - Settings live in exonerated.ini next to Exonerated.exe; delete it to go
     back to the defaults.
   - Saved games are kept in the "saves" folder here, so this whole folder
     is portable: copy it to another PC or drive and your game, settings and
-    saves come along. For a new version, unzip it over this folder, or copy
-    "game", "saves" and exonerated.ini into the new one. The Xbox's own
+    saves come along. For a new version, unzip it over this folder: the
+    download has no exonerated.ini, so your settings stay. The Xbox's own
     caches go in the "data" folder here; it is safe to delete, the game
     rebuilds it. Nothing is written outside this folder. (Versions up to
     0.9.5 kept those caches in %LOCALAPPDATA%\Exonerated; once your saves
     are in the "saves" folder you can delete that.)
   - To use a different copy of the game, delete the "game" folder (or the
     [game] lines in exonerated.ini) and start again.
+  - For a bug report, attach xbox_kernel.log from this folder. Each start
+    replaces it, so take it before you run the game again.
 
 LEGAL
   Exonerated is MIT-licensed open source (see the licenses folder). It is an

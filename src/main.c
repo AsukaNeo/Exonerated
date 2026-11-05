@@ -643,6 +643,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             SetCurrentDirectoryA(exe_dir);
         }
     }
+    /* The zip ships no exonerated.ini, so unzipping an update over an older
+     * copy can't reset anyone's settings. The first start writes one from
+     * the defaults linked into the exe (assets/exonerated-defaults.ini); an
+     * existing file is never touched. */
+    {
+        HRSRC res = FindResourceA(NULL, "RECOMP_DEFAULTS", (LPCSTR)RT_RCDATA);
+        HGLOBAL mem = res ? LoadResource(NULL, res) : NULL;
+        const char *src = mem ? (const char *)LockResource(mem) : NULL;
+        DWORD size = src ? SizeofResource(NULL, res) : 0, k, wrote;
+        HANDLE f = size ? CreateFileA("exonerated.ini", GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                                      FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+        if (f != INVALID_HANDLE_VALUE) {
+            for (k = 0; k < size; k++) {
+                if (src[k] == '\r')
+                    continue;
+                WriteFile(f, src[k] == '\n' ? "\r\n" : &src[k], src[k] == '\n' ? 2 : 1, &wrote, NULL);
+            }
+            CloseHandle(f);
+        }
+    }
 #endif
 
     printf("=== Exonerated ===\n");

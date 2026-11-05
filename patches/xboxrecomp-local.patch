@@ -3474,10 +3474,10 @@ index 0000000..d0b2adc
 +#endif
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
 new file mode 100644
-index 0000000..d1cc842
+index 0000000..96d7bbb
 --- /dev/null
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
-@@ -0,0 +1,4035 @@
+@@ -0,0 +1,4061 @@
 +#include "nv2a_gpu.h"
 +#include <d3d11.h>
 +#include <d3d11_1.h>
@@ -3537,6 +3537,7 @@ index 0000000..d1cc842
 +    uint64_t signed_texture_stages, packed_texture_stages;
 +    uint64_t window_clip_draws, window_scissor_draws, window_shader_draws, window_exclusive_draws;
 +    uint64_t decal_slack_draws;   /* [dz1] */
++    uint64_t glow_slack_draws;    /* [dz2] */
 +    uint64_t line_primitives, point_primitives;
 +    uint64_t sync_calls, target_evictions;
 +    uint64_t native_clears, clear_fallbacks;
@@ -3648,8 +3649,8 @@ index 0000000..d1cc842
 +    std::fprintf(stderr, "[GPU-D3D11] window clip: %llu configured draws, %llu scissor-only, %llu pixel-union, %llu exclusive\n",
 +                 (unsigned long long)gpu_timing.window_clip_draws, (unsigned long long)gpu_timing.window_scissor_draws,
 +                 (unsigned long long)gpu_timing.window_shader_draws, (unsigned long long)gpu_timing.window_exclusive_draws);
-+    std::fprintf(stderr, "[GPU-D3D11] decal slack: %llu draws (RECOMP_GPU_DECAL_SLACK)\n",
-+                 (unsigned long long)gpu_timing.decal_slack_draws);
++    std::fprintf(stderr, "[GPU-D3D11] decal slack: %llu draws (RECOMP_GPU_DECAL_SLACK); glow slack: %llu draws (RECOMP_GPU_GLOW_SLACK)\n",
++                 (unsigned long long)gpu_timing.decal_slack_draws, (unsigned long long)gpu_timing.glow_slack_draws);
 +    std::fprintf(stderr, "[GPU-D3D11] surface bytes: color copied %.3f GiB published %.3f GiB; depth published %.3f GiB converted %.3f GiB\n",
 +                 (double)gpu_timing.color_copy_bytes / 1073741824.0, (double)gpu_timing.color_publish_bytes / 1073741824.0,
 +                 (double)gpu_timing.depth_publish_bytes / 1073741824.0, (double)gpu_timing.depth_convert_bytes / 1073741824.0);
@@ -6976,16 +6977,33 @@ index 0000000..d1cc842
 +     * offset of its own and not W-buffered, is pulled RECOMP_GPU_DECAL_SLACK
 +     * depth units (e.g. 4 of 2^24) toward the eye, and EQUAL becomes LEQUAL
 +     * -- what the CPU rasteriser's RECOMP_ZEPS does there. Opt-in: on
-+     * Deathrow's light pools (texture 8009D000, glow2/trace1) it applied
-+     * and changed nothing; the game draws a different set of floor tiles
-+     * each frame, which is upstream of the renderer. */
++     * Deathrow's light pools it never applied: they write depth, so the
++     * test above left them out. See [dz2]. */
 +    static const float decal_slack = []() {
 +        const char *value = std::getenv("RECOMP_GPU_DECAL_SLACK");
 +        return value ? (float)std::atof(value) : 0.0f;
 +    }();
++    /* [dz2] Glow slack. Deathrow's floor glows (under the disc carrier, by
++     * the goals) are fixed-function additive passes (SRC_ALPHA, ONE) laid
++     * over floor polygons the vertex program drew, testing LEQUAL with depth
++     * writes ON. The two transforms land a few units apart, so the glow lost
++     * the test on whole polygons and in bands, and blinked as the camera
++     * moved. Such a pass is pulled RECOMP_GPU_GLOW_SLACK depth units (default
++     * 256 of 2^24) toward the eye and stops writing depth: rewriting the
++     * floor's own depth gains nothing, and a pulled depth would hide what is
++     * drawn after it (4096 hid players standing on a glow). 0 turns it off. */
++    static const float glow_slack = []() {
++        const char *value = std::getenv("RECOMP_GPU_GLOW_SLACK");
++        return value ? (float)std::atof(value) : 256.0f;
++    }();
 +    const bool decal_pass = decal_slack > 0.0f && state->depth_enable && !state->depth_mask &&
 +                            (state->depth_function == 0x202 || state->depth_function == 0x203) &&
 +                            !front_offset && !back_offset && !(state->control0 & 0x10000u);
++    const bool glow_pass = !decal_pass && glow_slack > 0.0f && state->depth_enable && state->depth_mask &&
++                           state->fixed_transform && !state->vertex_program &&
++                           state->blend_enable && state->blend_destination == 1 &&
++                           (state->depth_function == 0x202 || state->depth_function == 0x203) &&
++                           !front_offset && !back_offset && !(state->control0 & 0x10000u);
 +    if (state->stencil_enable && (state->depth_format != 2 || state->stencil_function < 0x200 || state->stencil_function > 0x207 ||
 +        !stencil_operation(state->stencil_fail) || !stencil_operation(state->stencil_depth_fail) || !stencil_operation(state->stencil_pass)))
 +        return reject("stencil format, comparison or operation");
@@ -7019,6 +7037,10 @@ index 0000000..d1cc842
 +    depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
 +    depth_description.DepthFunc = state->depth_enable ? (D3D11_COMPARISON_FUNC)(state->depth_function - 0x1FF) : D3D11_COMPARISON_ALWAYS;
 +    if (decal_pass) depth_description.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;   /* [dz1] */
++    if (glow_pass) {                                                            /* [dz2] */
++        depth_description.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
++        depth_description.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
++    }
 +    uint32_t depth_key = (depth_description.DepthEnable ? 8u : 0u) +
 +                        (depth_description.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL ? 16u : 0u) +
 +                        (uint32_t)depth_description.DepthFunc - 1u;
@@ -7156,6 +7178,10 @@ index 0000000..d1cc842
 +        constants.depth_offset[0] = 0.0f; constants.depth_offset[1] = -decal_slack;
 +        constants.depth_offset[2] = constants.depth_offset[3] = 1.0f;
 +        gpu_timing.decal_slack_draws++;
++    } else if (glow_pass) {                                      /* [dz2] */
++        constants.depth_offset[0] = 0.0f; constants.depth_offset[1] = -glow_slack;
++        constants.depth_offset[2] = constants.depth_offset[3] = 1.0f;
++        gpu_timing.glow_slack_draws++;
 +    }
 +    for (uint32_t stage = 0; stage < 8; stage++) {
 +        constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];

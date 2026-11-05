@@ -59,7 +59,7 @@ It has to be built on a machine with the game, because the code is lifted
 from the game's own `default.xbe`, so there's no CI for it.
 
 ```bash
-py -3 tools/make_release.py --version 0.9.8-beta
+py -3 tools/make_release.py --version 1.0.1
 ```
 
 The script won't run if either repo has uncommitted changes. `--allow-dirty`

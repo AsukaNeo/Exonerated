@@ -12,7 +12,7 @@ body:
     attributes:
       label: Exonerated version
       description: From the zip's name, or `dev` if you built it yourself.
-      placeholder: 0.9.7-beta
+      placeholder: 1.0.0
     validations:
       required: true
   - type: input

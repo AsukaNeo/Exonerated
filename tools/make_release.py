@@ -10,8 +10,9 @@ no CI can build it. This script:
   1. configures build-release/ with -DDR_RELEASE=ON (no search of this
      machine's game folders; see CMakeLists.txt) and builds it;
   2. assembles dist/Exonerated-<version>/ from an allow-list: the exe, a short
-     player README, a default exonerated.ini, the shader presets and
-     librashader, and the licences;
+     player README, the shader presets and librashader, and the licences
+     (no exonerated.ini: the exe writes one from its linked defaults on
+     first start, so unzipping an update never resets settings);
   3. zips it, then checks the zip holds exactly the allow-list, no game files,
      and no copy of the game's default.xbe inside the exe.
 
@@ -29,11 +30,6 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TOOLKIT = os.path.abspath(os.path.join(ROOT, "..", "xboxrecomp"))
 BUILD = os.path.join(ROOT, "build-release")
 DIST = os.path.join(ROOT, "dist")
-
-# The settings a fresh download starts with. The same file is linked into the
-# exe as RECOMP_DEFAULTS, so the menu's "Restore defaults" matches it.
-DEFAULT_INI = open(os.path.join(ROOT, "assets", "exonerated-defaults.ini"),
-                   encoding="utf-8").read()
 
 # The Shader setting: the presets in assets/shaders, and the librashader build
 # that runs them. That build is made by hand once per version and isn't kept in
@@ -77,7 +73,6 @@ def allow_list(exe):
     return {
         "Exonerated.exe": exe,
         "README.txt": None,                     # generated
-        "exonerated.ini": None,                 # generated
         "licenses/Exonerated-LICENSE.txt": os.path.join(ROOT, "LICENSE"),
         "licenses/Exonerated-NOTICE.txt": os.path.join(ROOT, "NOTICE"),
         "licenses/xboxrecomp-LICENSE.txt": os.path.join(TOOLKIT, "LICENSE"),
@@ -209,8 +204,6 @@ def main():
     readme = open(os.path.join(ROOT, "tools", "release_readme.txt"), encoding="utf-8").read()
     with open(os.path.join(stage, "README.txt"), "w", encoding="utf-8", newline="\r\n") as f:
         f.write(readme.replace("{version}", version))
-    with open(os.path.join(stage, "exonerated.ini"), "w", encoding="utf-8", newline="\r\n") as f:
-        f.write(DEFAULT_INI)
 
     zip_path = os.path.join(DIST, name + "-windows-x64.zip")
     if os.path.exists(zip_path):
@@ -225,10 +218,8 @@ def main():
             print("PROBLEM:", p)
         sys.exit("the zip failed its checks; do not publish it")
     digest = hashlib.sha256(open(zip_path, "rb").read()).hexdigest()
-    with open(os.path.join(DIST, "SHA256SUMS.txt"), "w", newline="
-") as f:
-        f.write("%s  %s
-" % (digest, os.path.basename(zip_path)))
+    with open(os.path.join(DIST, "SHA256SUMS.txt"), "w", newline="\n") as f:
+        f.write("%s  %s\n" % (digest, os.path.basename(zip_path)))
     print("ok: %s (%.1f MB)" % (zip_path, os.path.getsize(zip_path) / 1048576.0))
     print("sha256: %s" % digest)
 

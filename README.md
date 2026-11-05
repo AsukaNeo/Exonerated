@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AsukaNeo/Exonerated/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AsukaNeo/Exonerated?include_prereleases&label=download&color=c8102e"></a>
+  <a href="https://github.com/AsukaNeo/Exonerated/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AsukaNeo/Exonerated?label=download&color=c8102e"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
   <img alt="Original: Xbox" src="https://img.shields.io/badge/original-Xbox-107C10">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-lightgrey"></a>
@@ -24,9 +24,9 @@
 </p>
 
 > [!NOTE]
-> This is a beta. Full matches play from start to finish and Conquest works,
-> but there are still graphics glitches here and there. If you hit something,
-> please [open an issue](https://github.com/AsukaNeo/Exonerated/issues/new/choose).
+> Version 1.0. Full matches play from start to finish and Conquest works. A few
+> small graphics glitches remain. If you hit something, please
+> [open an issue](https://github.com/AsukaNeo/Exonerated/issues/new/choose).
 
 ## What is this?
 
@@ -58,13 +58,18 @@ Working well:
 - Sound, controllers with rumble, and the keyboard
 - Game speed that matches the Xbox
 - A title card, and a settings menu laid out like a PC game's own
+- The glow under the disc carrier and the lights by the goals
 
-Still rough:
+### Known issues
 
-- The glow under the disc carrier and some lights by the goals can flicker
-- A few textures glitch here and there
-
-Not happening: online play and System Link.
+- A few textures glitch here and there, such as stripes on the backdrop of the
+  loading screen before a match.
+- It has only been tested on an NVIDIA GeForce RTX 5080. Reports from other
+  graphics cards are very welcome.
+- The exe isn't code signed, so Windows may warn about it (see
+  [If something goes wrong](#if-something-goes-wrong)).
+- Linux and Steam Deck through Proton or Wine are untested.
+- Online play and System Link aren't possible.
 
 Things I'd like to get to: the last graphics glitches, testing on more graphics
 cards, button remapping, custom soundtracks and a Linux / Steam Deck build. Help
@@ -77,8 +82,20 @@ with any of them is welcome.
 - *Deathrow* for the original Xbox, the **North American release (version 3)**,
   either as a disc image (`.iso`) or as its files (`default.xbe` and the
   `data` folder)
-- 64-bit Windows 10 or 11 and a graphics card that does Direct3D 11
-- About 2 GB of free disk space
+- 64-bit Windows 10 or 11 and a graphics card that does Direct3D 11 (roughly
+  anything from 2012 on)
+- About 2 GB of free disk space: the download is about 16 MB, the copy of your
+  game about 1.1 GB, and the game's own cache up to about 500 MB
+
+Only this release works, because Exonerated is built from its exact program.
+You can check your copy before downloading:
+
+| | |
+|---|---|
+| Region | North America |
+| Version | 3 |
+| Title ID | 55530004 |
+| `default.xbe` SHA-1 | `34ef43c83ffa6860019edc4fc183241107a11ed2` |
 
 **Then:**
 
@@ -94,8 +111,24 @@ with any of them is welcome.
   <img src="docs/images/title-card.png" alt="The title card: Play, Settings, Exit to Windows" width="520">
 </p>
 
-To update, unzip the new version over the old one. Your game and saves stay put.
-If it asks about `exonerated.ini`, skip that file to keep your settings.
+To update, unzip the new version over the old one. Your game, saves and
+settings stay put.
+
+### Where your files go
+
+Everything stays in the folder you unzipped:
+
+```
+Exonerated.exe       the program
+exonerated.ini       your settings (written on the first start)
+game\                your copy of the game          keep
+saves\               your saves                     keep
+data\                the game's cache              safe to delete; it's rebuilt
+screenshots\         F12 screenshots
+shaders\             the RetroArch presets
+licenses\            licences for everything included
+xbox_kernel.log      the last run's log, for bug reports
+```
 
 ## Controls
 
@@ -163,9 +196,10 @@ see [docs/settings.md](docs/settings.md).
 
 **Windows or my antivirus warns about the exe.** The exe isn't code signed, so
 SmartScreen may say it's from an unknown publisher (More info → Run anyway), and
-a few antivirus tools don't like unsigned programs. The checksum of each download
-is on its release page, and you can always
-[build it yourself](#building-it-yourself).
+a few antivirus tools don't like unsigned programs. Windows 11's Smart App
+Control is stricter: it blocks unsigned programs outright and offers no way to
+run them, so you'd have to turn it off. The checksum of each download is on its
+release page, and you can always [build it yourself](#building-it-yourself).
 
 **"Not the supported version".** Only the North American disc (version 3) works,
 because Exonerated is built from that exact program.
@@ -176,7 +210,8 @@ please tell me about your graphics card in an issue.
 
 **It won't start, or it crashes.** Open an
 [issue](https://github.com/AsukaNeo/Exonerated/issues/new/choose) and attach
-`xbox_kernel.log` from the game's folder. Please don't attach game files.
+`xbox_kernel.log`, which sits next to `Exonerated.exe`. Each start replaces it,
+so grab it before you run the game again. Please don't attach game files.
 
 **I want to go back to the default settings.** Use Restore defaults in the menu,
 or delete `exonerated.ini`.

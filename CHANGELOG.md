@@ -3,8 +3,17 @@
 What changed in each download. The [Releases](https://github.com/AsukaNeo/Exonerated/releases)
 page has the zips.
 
-## Next
+## 1.0.0 (2026-11-05)
 
+The first full release.
+
+- **The floor glows no longer blink.** The glow under whoever carries the disc,
+  and the lights by the goals, used to flicker and break into stripes as the
+  camera moved. They were losing a depth test against the floor they're drawn
+  on; now they hold steady.
+- **Updating keeps your settings.** The download no longer includes
+  `exonerated.ini`; the first start writes one, so unzipping a new version
+  over the old one leaves your settings alone.
 - **Controls could stop working for a whole session** if the game was slow to
   start. The USB code gave up waiting after about 6 seconds, leaving no pad or
   keyboard until you restarted. Now it waits as long as it takes.

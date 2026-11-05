@@ -51,8 +51,10 @@ back. Movies are the exception: they keep playing, silently.
 
 ## exonerated.ini
 
-A downloaded build reads it from next to the exe. A dev build reads it from
-the folder you start it in, or from next to the exe.
+A downloaded build reads it from next to the exe, and writes it there with the
+defaults below on its first start (the download doesn't include one, so an
+update never overwrites yours). A dev build reads it from the folder you start
+it in, or from next to the exe.
 Every setting also has an environment variable that wins over the file, which
 is handy for quick tests. The `[FBWIN] settings` line near the top of a log
 shows what was actually used.
