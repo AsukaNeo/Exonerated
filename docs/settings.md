@@ -37,7 +37,7 @@ right, confirm with A or Enter, and close with B, Start or Esc. With the mouse,
 click a row to change it and right-click to go the other way. The game keeps
 running behind the menu but ignores your input while it's open.
 
-With "Pause in background" on (the default), the game and its sound stop
+With "Pause in background" on (it's off by default), the game and its sound stop
 while its window is in the background or minimised, and carry on when you come
 back. Movies are the exception: they keep playing, silently.
 
@@ -68,7 +68,7 @@ mode=windowed      ; windowed, borderless or fullscreen (older ini files'
 monitor=           ; \\.\DISPLAY2 and so on; empty is the primary monitor
 resolution=desktop ; WxH for fullscreen, e.g. 1920x1080, or desktop
 refresh=auto       ; for fullscreen: auto, max, or a rate your monitor offers
-pause_on_focus_loss=1 ; 0 keeps the game running in the background
+pause_on_focus_loss=0 ; 1 stops the game and its sound in the background
 window_scale=2     ; starting window size, as a multiple of 640x480
 present=d3d11      ; gdi is a plain fallback if Direct3D gives you trouble
 fps_counter=0      ; 1 shows an FPS counter
@@ -88,8 +88,10 @@ deadzone=0         ; extra stick dead zone, 0 to 32000
 ```
 
 The environment variable for each one is its name in capitals with `RECOMP_`
-in front, for example `RECOMP_RENDER_SCALE=2`. The renderer is the exception:
-use `RECOMP_PB_BACKEND=d3d11` or `cpu`.
+in front, for example `RECOMP_RENDER_SCALE=2`. A few have their own names: the
+renderer is `RECOMP_PB_BACKEND=d3d11` or `cpu`, `mode` is `RECOMP_DISPLAY_MODE`,
+`pause_on_focus_loss` is `RECOMP_FOCUS_PAUSE` and `deadzone` is
+`RECOMP_PAD_DEADZONE`.
 
 A few notes:
 

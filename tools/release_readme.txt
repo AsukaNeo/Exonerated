@@ -39,7 +39,7 @@ SETTINGS
   - Shader, on the Graphics tab: RetroArch presets over the finished picture.
     crt-lottes, crt-lottes-fast and crt-hyllian give a CRT look; fsr is AMD's
     upscaler. Off by default; see shaders\README.txt.
-  - Pause in background (on by default): the game and its sound stop while
+  - Pause in background (off by default): the game and its sound stop while
     the window is in the background or minimised.
 
 CONTROLS

@@ -12316,7 +12316,7 @@ index 67a8792..c60c18b 100644
  
  int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
-index efa5046..b5be955 100644
+index efa5046..2058ab1 100644
 --- a/src/usb/ohci.c
 +++ b/src/usb/ohci.c
 @@ -185,6 +185,22 @@ static int s_npads = 1;          /* RECOMP_USB_PADS */
@@ -12673,7 +12673,22 @@ index efa5046..b5be955 100644
      if (s_trace || claimed >= 0) {
          static unsigned n;
          if (n++ < 20) {
-@@ -1112,7 +1284,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1089,9 +1261,12 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+ 
+         /* Operational is HCFS == 10b in bits 7:6. Interrupting a controller
+          * the driver has not started yet is not a test of anything. */
++        /* Keep waiting however long that takes. This used to give up after
++         * 1500 ticks, about 6 s at this tick, and a title that started its
++         * USB driver later, say on a slow disk, had no pad for the whole
++         * run. */
+         if ((control & 0xC0u) != 0x80u) {
+-            if (++waited > 1500)              /* 30 s and it never started */
+-                break;
++            waited++;
+             continue;
+         }
+         if (!(enable & INTR_MIE))
+@@ -1112,12 +1287,12 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              unsigned port = pspec ? (unsigned)atoi(pspec) : (s_ndp >= 4 ? 2u : 0u);
              if (port >= s_ndp) port = s_ndp - 1u;
              hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
@@ -12682,7 +12697,13 @@ index efa5046..b5be955 100644
              plugged = 1;
              s_plugged_pads = 1;
              first_port = port;
-@@ -1130,7 +1302,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+             fprintf(stderr, "  [OHCI0] operational after %u ms; device "
+-                            "arriving on port %u\n", waited * 20, port + 1);
++                            "arriving on port %u\n", waited * OHCI_TICK_MS, port + 1);
+             fflush(stderr);
+         }
+ 
+@@ -1130,7 +1305,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              if (++settle > 50) {                 /* ~1 s after the last */
                  unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
                  hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
@@ -12691,7 +12712,7 @@ index efa5046..b5be955 100644
                  fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
                          s_plugged_pads + 1, port + 1, 10);
                  fflush(stderr);
-@@ -1162,7 +1334,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1162,7 +1337,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
               * controller zeroes, so a dword write is what hardware does. */
              if (hcca)
                  wr32(hcca + 0x80, hc->reg[HcFmNumber / 4]);
@@ -12700,7 +12721,7 @@ index efa5046..b5be955 100644
          }
  
          /* Be the bus master. ControlListEnable in HcControl says the driver
-@@ -1204,13 +1376,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1204,13 +1379,13 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
           && guest_ok(hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK, 16)) {
              if (ohci_walk_eds(hc, hc->reg[HcBulkHeadED / 4] & ED_PTR_MASK,
                                &pass_done))
@@ -12834,7 +12855,7 @@ index 331d2e2..8f3cd57 100644
                            d3d11 dxgi dxguid d3dcompiler)
  else()
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 3430107..85bf147 100644
+index 3430107..004b0a2 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -7,28 +7,89 @@
@@ -13479,7 +13500,7 @@ index 3430107..85bf147 100644
 +    cfg_str("RECOMP_WINDOW_TITLE", "title", RECOMP_APP_NAME,
 +            c->title, sizeof c->title);
 +    c->fps_counter = cfg_int("RECOMP_FPS_COUNTER", "fps_counter", 0) != 0;
-+    c->focus_pause = cfg_int("RECOMP_FOCUS_PAUSE", "pause_on_focus_loss", 1) != 0;
++    c->focus_pause = cfg_int("RECOMP_FOCUS_PAUSE", "pause_on_focus_loss", 0) != 0;
 +    c->rumble = cfg_int_in("input", "RECOMP_RUMBLE", "rumble", 1) != 0;
 +    c->deadzone = cfg_int_in("input", "RECOMP_PAD_DEADZONE", "deadzone", 0);
 +    c->render_scale = cfg_int("RECOMP_RENDER_SCALE", "render_scale", 1);
@@ -14130,7 +14151,7 @@ index 3430107..85bf147 100644
      }
      return DefWindowProcA(h, m, w, l);
  }
-@@ -435,99 +1389,2840 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -435,99 +1389,2842 @@ int xbox_FramebufferDumpBmp(const char *path)
      return 0;
  }
  
@@ -14508,6 +14529,8 @@ index 3430107..85bf147 100644
 +        break;
 +    default:
 +        if (s_launcher) {
++            rows[n++] = OV_FOCUSPAUSE;
++            rows[n++] = OV_DEFAULTS;
 +            rows[n++] = OV_BACK;
 +            return n;
 +        }
@@ -17039,7 +17062,7 @@ index 3430107..85bf147 100644
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -538,41 +4233,197 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -538,41 +4235,197 @@ static DWORD WINAPI fb_thread(LPVOID unused)
      bi.bmiHeader.biCompression = BI_RGB;
  
      s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
@@ -17252,7 +17275,7 @@ index 3430107..85bf147 100644
          }
          {
              /* One dump a few seconds in, so the title has had time to render
-@@ -584,45 +4435,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -584,45 +4437,95 @@ static DWORD WINAPI fb_thread(LPVOID unused)
               * pushbuffer executor's own dump follows its draw surface. With
               * double buffering those are different buffers, and measuring
               * progress from the executor's dump reports a blank screen while
@@ -17368,7 +17391,7 @@ index 3430107..85bf147 100644
      return 0;
  }
  
-@@ -630,7 +4531,7 @@ void xbox_FramebufferWindowStart(void)
+@@ -630,7 +4533,7 @@ void xbox_FramebufferWindowStart(void)
  {
      HANDLE th;
  
@@ -17377,7 +17400,7 @@ index 3430107..85bf147 100644
          return;
      if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
          return;
-@@ -641,4 +4542,44 @@ void xbox_FramebufferWindowStart(void)
+@@ -641,4 +4544,44 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  

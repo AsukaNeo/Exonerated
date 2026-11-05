@@ -3,6 +3,14 @@
 What changed in each download. The [Releases](https://github.com/AsukaNeo/Exonerated/releases)
 page has the zips.
 
+## Next
+
+- **Controls could stop working for a whole session** if the game was slow to
+  start. The USB code gave up waiting after about 6 seconds, leaving no pad or
+  keyboard until you restarted. Now it waits as long as it takes.
+- **Pause in background is now off by default**, and you can also set it on the
+  title card's System tab. An `exonerated.ini` you've already saved keeps its value.
+
 ## 0.9.7-beta (2026-11-03)
 
 RetroArch shaders, for a CRT look or sharper upscaling.

@@ -94,8 +94,8 @@ with any of them is welcome.
   <img src="docs/images/title-card.png" alt="The title card: Play, Settings, Exit to Windows" width="520">
 </p>
 
-To update, unzip the new version over the old one. Your game, saves and settings
-stay put.
+To update, unzip the new version over the old one. Your game and saves stay put.
+If it asks about `exonerated.ini`, skip that file to keep your settings.
 
 ## Controls
 
@@ -150,8 +150,8 @@ explaining what it does, and the mouse works too.
 - **Rumble** and an extra **stick dead zone** for worn sticks.
 
 ### System
-- **Pause in background**: the game and its sound stop while the window is
-  in the background or minimised.
+- **Pause in background** (off by default): the game and its sound stop while
+  the window is in the background or minimised.
 - **Take screenshot**, **Save settings** and **Exit to Windows**.
 
 Each tab has **Restore defaults**. The display changes wait for "Apply display
