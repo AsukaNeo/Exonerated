@@ -38,6 +38,8 @@ comforts on top.
 You need your own copy of the game. All of its art, sound, levels and movies
 come from your copy, and none of them are included here.
 
+Preview - [YouTube Gameplay Video](https://www.youtube.com/watch?v=RiJnfr17ujQ)
+
 ## What you get
 
 | | Xbox | Exonerated |
